@@ -22,13 +22,13 @@ const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
-  'gpt-4o': 'deepseek-ai/deepseek-v3.1',
-  'claude-3-opus': 'openai/gpt-oss-120b',
+  'gpt-3.5-turbo': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'gpt-4': 'nvidia/nemotron-3-super-120b-a12b',
+  'gpt-4-turbo': 'nvidia/nemotron-3-ultra-550b-a55b',
+  'gpt-4o': 'nvidia/nemotron-3-super-120b-a12b',
+  'claude-3-opus': 'nvidia/nemotron-3-ultra-550b-a55b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
+  'gemini-pro': 'openai/gpt-oss-20b'
 };
 
 // Health check endpoint
@@ -82,11 +82,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (!nimModel) {
         const modelLower = model.toLowerCase();
         if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
+          nimModel = 'nvidia/nemotron-3-super-120b-a12b';
         } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
+          nimModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
         } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
+          nimModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
         }
       }
     }
@@ -97,7 +97,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      extra_body: (ENABLE_THINKING_MODE && nimModel.startsWith('openai/gpt-oss')) ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
     
