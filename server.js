@@ -20,6 +20,23 @@ const SHOW_REASONING = true; // Set to true to show reasoning with <think> tags
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
 
+// Strip any inline  thinking... response tags a model may emit inside content.
+function stripThinkTags(text) {
+  if (!text) return text;
+  return text
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<\/?think(?:ing)?>/gi, '')
+    .trim();
+}
+
+// Pull inline think-tag reasoning out of content when no reasoning_content field exists.
+function extractThinkTags(text) {
+  if (!text) return null;
+  const m = text.match(/<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/i);
+  return m ? m[1].trim() : null;
+}
+
+
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3.5-lightning-30b-a3b',
@@ -117,7 +134,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       
       let buffer = '';
-      let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
@@ -134,38 +150,25 @@ app.post('/v1/chat/completions', async (req, res) => {
             try {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
-                
-                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
-                  }
-                  
-                  if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
-                  }
-                  
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
+                const d = data.choices[0].delta;
+                const reasoning = d.reasoning_content;
+                const rawContent = d.content || '';
+
+                // Always keep reasoning out of the visible content channel.
+                if (rawContent) {
+                  d.content = stripThinkTags(rawContent);
                 } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
-                  delete data.choices[0].delta.reasoning_content;
+                  d.content = '';
                 }
+
+                if (SHOW_REASONING && reasoning) {
+                  d.reasoning_content = reasoning;
+                } else {
+                  delete d.reasoning_content;
+                }
+
+                // Drop empty content deltas so consumers don't see stray blanks.
+                if (!d.content) delete d.content;
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
@@ -188,18 +191,20 @@ app.post('/v1/chat/completions', async (req, res) => {
         created: Math.floor(Date.now() / 1000),
         model: model,
         choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-          
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
+          const rawContent = choice.message?.content || '';
+          const content = stripThinkTags(rawContent);
+          const reasoning =
+            choice.message?.reasoning_content || extractThinkTags(rawContent);
+          const msg = {
+            role: choice.message.role,
+            content: content
+          };
+          if (SHOW_REASONING && reasoning) {
+            msg.reasoning_content = reasoning;
           }
-          
           return {
             index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
+            message: msg,
             finish_reason: choice.finish_reason
           };
         }),
