@@ -21,12 +21,14 @@ const SHOW_REASONING = true; // Set to true to show reasoning with <think> tags
 const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
 
 // Strip any inline  thinking... response tags a model may emit inside content.
-function stripThinkTags(text) {
+function stripThinkTags(text, trim = true) {
   if (!text) return text;
-  return text
+  const result = text
     .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
-    .replace(/<\/?think(?:ing)?>/gi, '')
-    .trim();
+    .replace(/<\/?think(?:ing)?>/gi, '');
+  // Streaming chunks must preserve leading/trailing spaces; trimming each chunk
+  // can concatenate adjacent words when JanitorAI joins the deltas.
+  return trim ? result.trim() : result;
 }
 
 // Pull inline think-tag reasoning out of content when no reasoning_content field exists.
@@ -156,7 +158,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
                 // Always keep reasoning out of the visible content channel.
                 if (rawContent) {
-                  d.content = stripThinkTags(rawContent);
+                  d.content = stripThinkTags(rawContent, false);
                 } else {
                   d.content = '';
                 }
