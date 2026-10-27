@@ -27,7 +27,7 @@ jobs:
           with open("proxy_config.yaml", encoding="utf-8") as f:
               cfg = yaml.safe_load(f)
           assert cfg.get("model_list") == []
-          assert cfg["litellm_settings"]["callbacks"] == "custom_callbacks.roleplay_hook"
+          assert cfg["litellm_settings"]["callbacks"] == ["custom_callbacks.roleplay_hook"]
           assert cfg["general_settings"]["master_key"] == "os.environ/LITELLM_MASTER_KEY"
           assert cfg["general_settings"]["database_url"] == "os.environ/DATABASE_URL"
           assert cfg["router_settings"]["num_retries"] == 2
