@@ -13,6 +13,33 @@ app.use(express.json());
 // NVIDIA NIM API configuration
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
+const PROXY_API_KEY = process.env.PROXY_API_KEY;
+
+// Protect OpenAI-compatible endpoints so only clients with the proxy key can use the NVIDIA quota.
+app.use('/v1', (req, res, next) => {
+  if (!PROXY_API_KEY) {
+    return res.status(503).json({
+      error: {
+        message: 'Proxy authentication is not configured',
+        type: 'server_error',
+        code: 503
+      }
+    });
+  }
+
+  const authorization = req.get('authorization') || '';
+  const suppliedKey = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!suppliedKey || suppliedKey !== PROXY_API_KEY) {
+    return res.status(401).json({
+      error: {
+        message: 'Invalid proxy API key',
+        type: 'authentication_error',
+        code: 401
+      }
+    });
+  }
+  next();
+});
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 const SHOW_REASONING = true; // Set to true to show reasoning with <think> tags
