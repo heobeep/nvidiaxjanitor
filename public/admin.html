@@ -187,7 +187,7 @@ document.getElementById('loginForm').addEventListener('submit',function(e){e.pre
 document.getElementById('nav').addEventListener('click',function(e){var b=e.target.closest('[data-page]');if(b)showPage(b.dataset.page)});
 document.getElementById('mobileMenu').addEventListener('click',function(){document.getElementById('nav').classList.toggle('open')});
 document.getElementById('page').addEventListener('input',function(e){if(e.target.dataset.range){var v=document.getElementById(e.target.id+'Value');if(v)v.textContent=e.target.value}});
-document.getElementById('page').addEventListener('click',function(e){
+document.body.addEventListener('click',function(e){
  var el=e.target.closest('[data-action],[data-copy-model],[data-test-provider],[data-toggle-provider],[data-delete-provider],[data-delete-client],[data-rename-client],[data-switch]');
  if(!el)return;
  if(el.dataset.copyModel){copy(el.dataset.copyModel);return}
