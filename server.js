@@ -134,6 +134,8 @@ function clientKeyForRequest(req) {
   return state.clientKeys.find(k => safeEqual(k.hash, digest)) || null;
 }
 function requireClientKey(req, res, next) {
+  // Preserve uptime probes without exposing model data; HEAD responses have no body.
+  if (req.method === 'HEAD' && req.path === '/models') return next();
   const key = clientKeyForRequest(req);
   if (!key) return res.status(401).json({
     error: { message: 'Invalid or missing proxy API key.', type: 'authentication_error', code: 401 }
