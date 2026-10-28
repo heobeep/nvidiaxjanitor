@@ -39,16 +39,7 @@ function extractThinkTags(text) {
 }
 
 
-// Model mapping (adjust based on available NIM models)
-const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/nemotron-3.5-lightning-30b-a3b',
-  'gpt-4': 'nvidia/nemotron-3-super-120b-a12b',
-  'gpt-4-turbo': 'nvidia/nemotron-3-super-120b-a12b',
-  'gpt-4o': 'nvidia/nemotron-3-super-120b-a12b',
-  'claude-3-opus': 'nvidia/nemotron-3-super-120b-a12b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'openai/gpt-oss-20b'
-};
+
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -60,19 +51,23 @@ app.get('/health', (req, res) => {
   });
 });
 
-// List models endpoint (OpenAI compatible)
-app.get('/v1/models', (req, res) => {
-  const models = Object.keys(MODEL_MAPPING).map(model => ({
-    id: model,
-    object: 'model',
-    created: Date.now(),
-    owned_by: 'nvidia-nim-proxy'
-  }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+// List models exposed by NVIDIA NIM, preserving the provider's actual model IDs.
+app.get('/v1/models', async (req, res) => {
+  try {
+    const response = await axios.get(`${NIM_API_BASE}/models`, {
+      headers: { 'Authorization': `Bearer ${NIM_API_KEY}` }
+    });
+    res.json(response.data);
+  } catch (error) {
+    console.error('Models list error:', error.message);
+    res.status(error.response?.status || 502).json(error.response?.data || {
+      error: {
+        message: 'Unable to retrieve models from NVIDIA NIM',
+        type: 'upstream_error',
+        code: error.response?.status || 502
+      }
+    });
+  }
 });
 
 // Chat completions endpoint (main proxy)
@@ -80,43 +75,26 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Smart model selection with fallback
-    let nimModel = MODEL_MAPPING[model];
-    if (!nimModel) {
-      try {
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
-        });
-      } catch (e) {}
-      
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'nvidia/nemotron-3-super-120b-a12b';
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
-        } else {
-          nimModel = 'nvidia/nemotron-3.5-lightning-30b-a3b';
+    // Forward JanitorAI's selected model ID exactly as supplied.
+    if (typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({
+        error: {
+          message: 'A model ID is required. Choose a model exposed by GET /v1/models.',
+          type: 'invalid_request_error',
+          code: 400
         }
-      }
+      });
     }
-    
-    // Transform OpenAI request to NIM format
+    const nimModel = model;
+
+    // Transform OpenAI request to NIM format; preserve JanitorAI parameters not explicitly adjusted here.
     const nimRequest = {
+      ...req.body,
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
-      extra_body: (ENABLE_THINKING_MODE && nimModel.startsWith('openai/gpt-oss')) ? { chat_template_kwargs: { thinking: true } } : undefined,
+      temperature: temperature ?? 0.6,
+      max_tokens: max_tokens ?? 9024,
+      extra_body: (ENABLE_THINKING_MODE && nimModel.startsWith('openai/gpt-oss')) ? { chat_template_kwargs: { thinking: true } } : req.body.extra_body,
       stream: stream || false
     };
     
