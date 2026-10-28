@@ -304,11 +304,20 @@ app.get('/health', (req, res) => res.json({
   persistence: 'encrypted', activeProviderKeys: state ? state.providerKeys.filter(k => k.enabled !== false).length : 0
 }));
 
+const loginAttempts = new Map();
 app.post('/admin/api/login', (req, res) => {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  let attempts = loginAttempts.get(ip);
+  if (!attempts || now - attempts.startedAt > 15 * 60 * 1000) attempts = { startedAt: now, count: 0 };
+  if (attempts.count >= 8) return res.status(429).json({ error: 'Too many sign-in attempts. Wait 15 minutes before trying again.' });
   const supplied = req.body && req.body.password;
   if (typeof supplied !== 'string' || !safeEqual(supplied, ADMIN_PASSWORD)) {
+    attempts.count += 1;
+    loginAttempts.set(ip, attempts);
     return res.status(401).json({ error: 'That admin password is not correct.' });
   }
+  loginAttempts.delete(ip);
   const expiry = Date.now() + 8 * 60 * 60 * 1000;
   const secure = req.secure || req.get('x-forwarded-proto') === 'https';
   res.setHeader('Set-Cookie', 'nj_admin=' + encodeURIComponent(sessionCookie(expiry)) + '; HttpOnly; Path=/admin; SameSite=Strict; Max-Age=28800' + (secure ? '; Secure' : ''));
@@ -506,7 +515,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
       response.data.on('end', () => { if (buffer.trim()) res.write(buffer + '\n'); res.end(); });
       response.data.on('error', err => { console.error('NIM stream error:', err.message); res.end(); });
-      req.on('close', () => { if (!res.writableEnded && response.data && response.data.destroy) response.data.destroy(); });
+      res.on('close', () => { if (!res.writableEnded && response.data && response.data.destroy) response.data.destroy(); });
     } else {
       const payload = response.data || {};
       const out = {
