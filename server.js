@@ -568,6 +568,88 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+
+app.post('/admin/api/models/race', async (req, res) => {
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  try {
+    const catalogue = await refreshModels(true);
+    const allModels = catalogue.models || [];
+    const providers = state.providerKeys.filter(k => k.enabled !== false);
+    if (!allModels.length) return res.status(502).json({ error: 'No accessible models were returned by the enabled NVIDIA keys.', providers: catalogue.providers || [] });
+    const profiles = [
+      { name: 'baseline', max_tokens: 384, system: false, thinkingOff: false },
+      { name: 'larger-budget', max_tokens: 1536, system: true, thinkingOff: false },
+      { name: 'thinking-off', max_tokens: 1536, system: true, thinkingOff: true }
+    ];
+    function textContent(value) {
+      if (typeof value === 'string') return value;
+      if (Array.isArray(value)) return value.map(part => typeof part === 'string' ? part : (part && (part.text || part.content) || '')).join('');
+      return '';
+    }
+    async function probe(modelId, provider, profile) {
+      const userPrompt = profile.thinkingOff ? 'Say ALIVE_OK. Output visible answer text only.' : 'Reply with exactly ALIVE_OK and nothing else.';
+      const messages = profile.system
+        ? [{ role: 'system', content: 'You are a concise assistant. Do not output hidden reasoning. Return visible text only.' }, { role: 'user', content: userPrompt }]
+        : [{ role: 'user', content: userPrompt }];
+      const body = { model: modelId, messages, temperature: 0, top_p: 1, max_tokens: profile.max_tokens, stream: false };
+      if (profile.thinkingOff) body.extra_body = { chat_template_kwargs: { thinking: false } };
+      const t0 = Date.now();
+      try {
+        const response = await axios.post(NIM_API_BASE + '/chat/completions', body, {
+          headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
+          timeout: 30000, validateStatus: status => status >= 200 && status < 300
+        });
+        const payload = response.data || {};
+        const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+        const message = choice && choice.message || {};
+        const rawContent = textContent(message.content);
+        const visibleContent = stripThinkTags(rawContent);
+        const reasoning = textContent(message.reasoning_content) || extractThinkTags(rawContent) || '';
+        return { profile: profile.name, httpStatus: response.status, latencyMs: Date.now() - t0, contentChars: visibleContent.length, rawContentChars: rawContent.length, reasoningChars: reasoning.length, finishReason: choice && choice.finish_reason || null, preview: visibleContent.slice(0, 180), reasoningPreview: reasoning.slice(0, 120), error: '' };
+      } catch (error) {
+        return { profile: profile.name, httpStatus: error.response && error.response.status || null, latencyMs: Date.now() - t0, contentChars: 0, rawContentChars: 0, reasoningChars: 0, finishReason: null, preview: '', reasoningPreview: '', error: cleanProviderError(error) };
+      }
+    }
+    async function testModel(model) {
+      const availableVia = Array.isArray(model.available_via) ? model.available_via : [];
+      let candidates = providers.filter(p => availableVia.includes(p.label));
+      if (!candidates.length) candidates = providers;
+      const attempts = [];
+      let firstError = '', reasoningPreview = '', totalLatency = 0;
+      for (const provider of candidates) {
+        for (const profile of profiles) {
+          const a = await probe(model.id, provider, profile);
+          attempts.push(Object.assign({ provider: provider.label }, a));
+          totalLatency += a.latencyMs || 0;
+          if (!firstError && a.error) firstError = a.error;
+          if (a.reasoningPreview) reasoningPreview = a.reasoningPreview;
+          if (!a.error && a.contentChars > 0) {
+            return { model: model.id, status: profile.name === 'baseline' ? 'alive' : 'adaptive', workingProfile: profile.name, testedVia: provider.label, latencyMs: totalLatency, firstResponseMs: attempts[0] ? attempts[0].latencyMs : null, contentChars: a.contentChars, reasoningChars: a.reasoningChars, finishReason: a.finishReason, preview: a.preview, error: '', attempts: attempts.map(x => ({ profile:x.profile,provider:x.provider,httpStatus:x.httpStatus,latencyMs:x.latencyMs,contentChars:x.contentChars,reasoningChars:x.reasoningChars,finishReason:x.finishReason,error:x.error })) };
+          }
+          if (a.error && [401, 403, 404, 429].includes(a.httpStatus)) break;
+        }
+      }
+      const reasoningOnly = attempts.some(a => a.reasoningChars > 0);
+      const success = attempts.some(a => a.httpStatus >= 200 && a.httpStatus < 300);
+      return { model: model.id, status: reasoningOnly ? 'reasoning-only' : success ? 'empty' : 'error', workingProfile: '', testedVia: attempts.length ? attempts[attempts.length - 1].provider : '', latencyMs: totalLatency, firstResponseMs: attempts[0] ? attempts[0].latencyMs : null, contentChars: 0, reasoningChars: attempts.reduce((n,a) => n + (a.reasoningChars || 0),0), finishReason: attempts.length ? attempts[attempts.length - 1].finishReason : null, preview: '', reasoningPreview, error: firstError, attempts: attempts.map(x => ({ profile:x.profile,provider:x.provider,httpStatus:x.httpStatus,latencyMs:x.latencyMs,contentChars:x.contentChars,reasoningChars:x.reasoningChars,finishReason:x.finishReason,error:x.error })) };
+    }
+    const results = new Array(allModels.length);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(5, allModels.length) }, async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= allModels.length) break;
+        try { results[index] = await testModel(allModels[index]); }
+        catch (error) { results[index] = { model:allModels[index].id,status:'error',workingProfile:'',testedVia:'',latencyMs:0,firstResponseMs:null,contentChars:0,reasoningChars:0,finishReason:null,preview:'',error:cleanProviderError(error),attempts:[] }; }
+      }
+    }));
+    const summary = { total:results.length,alive:0,adaptive:0,reasoningOnly:0,empty:0,error:0 };
+    results.forEach(r => { if(r.status==='alive')summary.alive++;else if(r.status==='adaptive')summary.adaptive++;else if(r.status==='reasoning-only')summary.reasoningOnly++;else if(r.status==='empty')summary.empty++;else summary.error++; });
+    res.json({ startedAt,finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,fetchedAt:catalogue.fetchedAt,summary,results });
+  } catch (error) { res.status(error.status || 502).json({ error:error.message || 'Model race failed.',providers:error.modelResults || [] }); }
+});
+
 app.all('*', (req, res) => {
   res.status(404).json({ error: { message: 'Endpoint ' + req.path + ' not found', type: 'invalid_request_error', code: 404 } });
 });
