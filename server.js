@@ -89,7 +89,7 @@ async function persistState() {
   return saveQueue;
 }
 function emptyState() {
-  return { version: 1, settings: Object.assign({}, DEFAULT_SETTINGS), providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
+  return { version: 1, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
 }
 async function initializeState() {
   if (ENCRYPTION_KEY.length !== 32) throw new Error('DATA_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).');
@@ -124,6 +124,10 @@ async function initializeState() {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, state.settings || {});
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
+    if (!state.adminPasswordHash) {
+      state.adminPasswordHash = sha256(ADMIN_PASSWORD);
+      await persistState();
+    }
   }
 }
 function clientKeyForRequest(req) {
@@ -314,7 +318,7 @@ app.post('/admin/api/login', (req, res) => {
   if (!attempts || now - attempts.startedAt > 15 * 60 * 1000) attempts = { startedAt: now, count: 0 };
   if (attempts.count >= 8) return res.status(429).json({ error: 'Too many sign-in attempts. Wait 15 minutes before trying again.' });
   const supplied = req.body && req.body.password;
-  if (typeof supplied !== 'string' || !safeEqual(supplied, ADMIN_PASSWORD)) {
+  if (typeof supplied !== 'string' || !safeEqual(sha256(supplied), state.adminPasswordHash)) {
     attempts.count += 1;
     loginAttempts.set(ip, attempts);
     return res.status(401).json({ error: 'That admin password is not correct.' });
@@ -323,6 +327,19 @@ app.post('/admin/api/login', (req, res) => {
   const expiry = Date.now() + 8 * 60 * 60 * 1000;
   const secure = req.secure || req.get('x-forwarded-proto') === 'https';
   res.setHeader('Set-Cookie', 'nj_admin=' + encodeURIComponent(sessionCookie(expiry)) + '; HttpOnly; Path=/admin; SameSite=Strict; Max-Age=28800' + (secure ? '; Secure' : ''));
+  res.json({ ok: true });
+});
+app.post('/admin/api/password', requireAdmin, async (req, res) => {
+  const current = req.body && req.body.currentPassword;
+  const next = req.body && req.body.newPassword;
+  if (typeof current !== 'string' || !safeEqual(sha256(current), state.adminPasswordHash)) {
+    return res.status(401).json({ error: 'Current admin password is incorrect.' });
+  }
+  if (typeof next !== 'string' || next.length < 12 || next.length > 128) {
+    return res.status(400).json({ error: 'New password must be between 12 and 128 characters.' });
+  }
+  state.adminPasswordHash = sha256(next);
+  await persistState();
   res.json({ ok: true });
 });
 app.post('/admin/api/logout', requireAdmin, (req, res) => {
