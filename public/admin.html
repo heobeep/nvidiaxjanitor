@@ -55,6 +55,8 @@
 var state = null;
 var models = [];
 var modelResults = [];
+var modelRace = null;
+var modelRaceRunning = false;
 var activePage = 'overview';
 var busy = false;
 var icons = {
@@ -108,11 +110,32 @@ function renderModels(){
  var query=(document.getElementById('modelSearch')||{}).value||'';
  var q=query.toLowerCase();
  var filtered=models.filter(function(m){return (m.id+' '+(m.owned_by||'')).toLowerCase().includes(q)});
- var out=pageHead('MODEL DISCOVERY','Find the right model.','Live model IDs returned by your NVIDIA key pool. Choose a listed ID in JanitorAI; this proxy forwards the chosen ID without silently substituting another model.',btn('Refresh catalog','refresh-models','refresh','primary'));
+ var actions='<div style="display:flex;gap:8px;flex-wrap:wrap">'+btn(modelRaceRunning?'Racing…':'Race every model','race-models','spark','primary')+btn('Refresh catalog','refresh-models','refresh','')+'</div>';
+ var out=pageHead('MODEL DISCOVERY','Find the right model.','Live IDs from your NVIDIA key pool. Race real inference requests to distinguish healthy models, query-sensitive models, empty outputs, and upstream errors.',actions);
  out+='<div class="panel model-catalog-note"><div><div class="item-title">'+icon('layers')+'Your accessible models <span class="badge lime">'+models.length+' loaded</span></div><div class="item-meta">Fetched '+esc(fmtDate(modelFetchedAt))+' · Combined across enabled keys</div></div><a class="btn" target="_blank" rel="noopener" href="https://build.nvidia.com/models?api-key=false">Open free catalog ↗</a></div>';
+ if(modelRaceRunning)out+='<div class="panel panel-pad" style="margin-bottom:15px"><div class="item-title">'+icon('spark')+'Model race running</div><p class="muted">Sending live inference probes to every listed model, with up to three request profiles for models that return no visible text. Keep this tab open until results appear.</p><div class="item-meta">Models in catalog: '+models.length+' · Concurrency capped at 5</div></div>';
+ if(modelRace){
+  var rsu=modelRace.summary||{};
+  out+='<div class="panel panel-pad" style="margin-bottom:15px"><div class="panel-title"><div><h2>Inference race results</h2><p>Completed '+esc(fmtDate(modelRace.finishedAt))+' · '+Math.round((modelRace.durationMs||0)/1000)+'s elapsed · '+(rsu.total||0)+' models tested</p></div><span class="badge lime">Report ready</span></div>';
+  out+='<div class="grid stat-grid">'+statCard('Alive',rsu.alive||0,'Visible text on first query','spark')+statCard('Adaptive',rsu.adaptive||0,'Needed fallback profile','sliders')+statCard('Reasoning only',rsu.reasoningOnly||0,'Reasoning, no visible reply','eye')+statCard('Empty / errors',(rsu.empty||0)+(rsu.error||0),'Need inspection','alert')+'</div>';
+  out+='<div class="table-wrap" style="overflow:auto;margin-top:14px"><table style="width:100%;border-collapse:collapse;min-width:760px"><thead><tr><th style="text-align:left;padding:10px;border-bottom:1px solid var(--line)">Model</th><th style="text-align:left;padding:10px;border-bottom:1px solid var(--line)">Verdict</th><th style="text-align:left;padding:10px;border-bottom:1px solid var(--line)">Working query</th><th style="text-align:right;padding:10px;border-bottom:1px solid var(--line)">Latency</th><th style="text-align:left;padding:10px;border-bottom:1px solid var(--line)">Response / error</th></tr></thead><tbody>';
+  out+=(modelRace.results||[]).map(function(r){
+   var cls=r.status==='alive'||r.status==='adaptive'?'green':r.status==='reasoning-only'?'warn':'bad';
+   var verdict=({'alive':'ALIVE','adaptive':'QUERY-DEPENDENT','reasoning-only':'REASONING ONLY','empty':'EMPTY','error':'UPSTREAM ERROR'})[r.status]||r.status;
+   var detail=r.preview||r.reasoningPreview||r.error||((r.contentChars||0)+' visible characters');
+   var attempts=(r.attempts||[]).map(function(a){return a.profile+': HTTP '+(a.httpStatus||'—')+', '+(a.latencyMs||0)+'ms, '+(a.contentChars||0)+' visible chars'+(a.reasoningChars?' / '+a.reasoningChars+' reasoning chars':'')+(a.error?' ('+a.error+')':'')}).join(' · ');
+   return '<tr><td style="vertical-align:top;padding:10px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,monospace">'+esc(r.model)+'</td><td style="vertical-align:top;padding:10px;border-bottom:1px solid var(--line)"><span class="badge '+cls+'">'+esc(verdict)+'</span><div class="item-meta">'+esc(r.testedVia||'No provider')+'</div></td><td style="vertical-align:top;padding:10px;border-bottom:1px solid var(--line)">'+esc(r.workingProfile||'None')+'</td><td style="vertical-align:top;padding:10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap">'+(r.firstResponseMs==null?'—':r.firstResponseMs+'ms')+'<div class="item-meta">total '+(r.latencyMs||0)+'ms</div></td><td style="vertical-align:top;padding:10px;border-bottom:1px solid var(--line);max-width:300px;overflow-wrap:anywhere">'+esc(detail)+'<details style="margin-top:6px"><summary class="muted tiny">Attempt details</summary><div class="item-meta">'+esc(attempts||'No attempts recorded')+'</div></details></td></tr>'
+  }).join('');
+  out+='</tbody></table></div><div class="footer-note" style="margin-top:12px">“Alive” means upstream returned visible text. “Query-dependent” means a fallback request produced visible text. “Reasoning only” means the provider returned reasoning but no visible response; that can point to template or adapter handling rather than a dead model. The benchmark uses one concise prompt, then a larger token budget and a thinking-disabled profile only when needed.</div></div>';
+ }
  out+='<div class="search-row"><div class="search">'+icon('search')+'<input id="modelSearch" placeholder="Search model ID or publisher…" value="'+esc(query)+'"></div><span class="muted tiny">'+filtered.length+' result(s)</span></div>';
  if(!filtered.length){out+='<div class="empty"><div class="empty-icon">'+icon('layers')+'</div><h3>'+(models.length?'No models match that search':'No model list loaded yet')+'</h3><p>'+(models.length?'Try another search term.':'Add a working NVIDIA key, then refresh the catalog. The public catalog is available separately.')+'</p>'+btn('Refresh models','refresh-models','refresh','primary')+'</div>'}
- else {out+='<div class="model-grid">'+filtered.map(function(m){return '<article class="model-card"><div class="item-title">'+icon('spark')+'<span class="model-name">'+esc(m.id)+'</span></div><div class="model-owner">'+esc(m.owned_by||'NVIDIA NIM')+'</div><div class="item-bottom"><span class="badge green">'+esc((m.available_via||[]).length)+' key source(s)</span><button class="btn small" data-copy-model="'+esc(m.id)+'">'+icon('copy')+' Copy ID</button></div></article>'}).join('')+'</div>'}
+ else {out+='<div class="model-grid">'+filtered.map(function(m){
+  var row=modelRace&&modelRace.results?modelRace.results.find(function(r){return r.model===m.id}):null;
+  var cls=row?(row.status==='alive'||row.status==='adaptive'?'green':row.status==='reasoning-only'?'warn':'bad'):'';
+  var status=row?'<span class="badge '+cls+'">'+esc(({'alive':'Alive','adaptive':'Query-dependent','reasoning-only':'Reasoning only','empty':'Empty','error':'Error'})[row.status]||row.status)+'</span>':'';
+  return '<article class="model-card"><div class="item-title">'+icon('spark')+'<span class="model-name">'+esc(m.id)+'</span></div><div class="model-owner">'+esc(m.owned_by||'NVIDIA NIM')+'</div><div class="item-bottom"><span class="badge green">'+esc((m.available_via||[]).length)+' key source(s)</span>'+status+'<button class="btn small" data-copy-model="'+esc(m.id)+'">'+icon('copy')+' Copy ID</button></div></article>'
+ }).join('')+'</div>'}
  out+='<div class="divider-label">Provider key checks</div>';
  out+='<div class="grid section-grid">'+(modelResults||[]).map(function(r){return '<div class="item-card"><div class="item-top"><div><div class="item-title">'+esc(r.label)+'</div><div class="item-meta">'+(r.ok?esc(r.count)+' model(s) returned':esc(r.error||'Could not fetch model list'))+'</div></div><span class="badge '+(r.ok?'green':'warn')+'">'+(r.ok?'Connected':'Check key')+'</span></div></div>'}).join('')+'</div>';
  return out
@@ -201,6 +224,7 @@ document.body.addEventListener('click',function(e){
  var action=el.dataset.action;
  if(action==='copy-url'){copy(currentBase());return}
  if(action==='refresh-models'){el.disabled=true;loadModels(true).then(function(){return reloadState(activePage)}).then(function(){toast('Model catalog updated: '+models.length+' model(s)','good')}).catch(function(){});return}
+  if(action==='race-models'){if(modelRaceRunning)return;modelRaceRunning=true;modelRace=null;showPage('models');toast('Racing every listed model…','good');api('/admin/api/models/race',{method:'POST',body:'{}'}).then(function(d){modelRace=d;modelRaceRunning=false;showPage('models');var s=d.summary||{};var bad=(s.empty||0)+(s.error||0);toast('Race complete: '+(s.alive||0)+' alive, '+(s.adaptive||0)+' query-dependent, '+(s.reasoningOnly||0)+' reasoning-only, '+bad+' empty/errors',bad?'warn':'good')}).catch(function(err){modelRaceRunning=false;showPage('models');toast(err.message||'Model race failed','bad')});return}
  if(action==='add-provider'){addProviderModal();return}
  if(action==='add-client'){addClientModal();return}
  if(action==='save-provider'){var label=formValue('providerLabel'),key=formValue('providerSecret');if(!label.trim()||!key.trim()){toast('Enter a label and key first','bad');return}el.disabled=true;api('/admin/api/keys/providers',{method:'POST',body:JSON.stringify({label:label,key:key})}).then(function(){closeModal();toast('NVIDIA key encrypted and added');return reloadState('providers')}).catch(function(err){el.disabled=false;toast(err.message,'bad')});return}
