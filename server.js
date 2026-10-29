@@ -9,6 +9,7 @@ const fs = require('fs/promises');
 const path = require('path');
 
 const app = express();
+let modelRaceProgress = null;
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -569,14 +570,22 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 
+app.get('/admin/api/models/race/status', (req, res) => {
+  if (!modelRaceProgress) return res.json({ running:false, completed:0, total:0, results:[], events:[] });
+  res.json(modelRaceProgress);
+});
+
 app.post('/admin/api/models/race', async (req, res) => {
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
+  if (modelRaceProgress && modelRaceProgress.running) return res.status(409).json({ error:'A model race is already running.' });
+  modelRaceProgress = { running:true, phase:'loading-catalog', startedAt, completed:0, total:0, activeModel:'', activeProfile:'', activeProvider:'', results:[], events:[], summary:{ total:0,alive:0,adaptive:0,reasoningOnly:0,empty:0,error:0 } };
   try {
     const catalogue = await refreshModels(true);
     const allModels = catalogue.models || [];
     const providers = state.providerKeys.filter(k => k.enabled !== false);
-    if (!allModels.length) return res.status(502).json({ error: 'No accessible models were returned by the enabled NVIDIA keys.', providers: catalogue.providers || [] });
+    if (!allModels.length) { modelRaceProgress.running=false; modelRaceProgress.phase='failed'; modelRaceProgress.error='No accessible models were returned by the enabled NVIDIA keys.'; return res.status(502).json({ error: modelRaceProgress.error, providers: catalogue.providers || [] }); }
+    modelRaceProgress.phase='testing'; modelRaceProgress.total=allModels.length; modelRaceProgress.fetchedAt=catalogue.fetchedAt; modelRaceProgress.events.push({at:new Date().toISOString(),type:'start',message:'Catalog loaded: '+allModels.length+' models. Up to 5 concurrent probes.'});
     const profiles = [
       { name: 'baseline', max_tokens: 384, system: false, thinkingOff: false },
       { name: 'larger-budget', max_tokens: 1536, system: true, thinkingOff: false },
@@ -595,6 +604,7 @@ app.post('/admin/api/models/race', async (req, res) => {
       const body = { model: modelId, messages, temperature: 0, top_p: 1, max_tokens: profile.max_tokens, stream: false };
       if (profile.thinkingOff) body.extra_body = { chat_template_kwargs: { thinking: false } };
       const t0 = Date.now();
+      if (modelRaceProgress) { modelRaceProgress.activeModel=modelId; modelRaceProgress.activeProfile=profile.name; modelRaceProgress.activeProvider=provider.label; }
       try {
         const response = await axios.post(NIM_API_BASE + '/chat/completions', body, {
           headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
@@ -624,6 +634,7 @@ app.post('/admin/api/models/race', async (req, res) => {
           totalLatency += a.latencyMs || 0;
           if (!firstError && a.error) firstError = a.error;
           if (a.reasoningPreview) reasoningPreview = a.reasoningPreview;
+          if (modelRaceProgress) { modelRaceProgress.events.unshift({at:new Date().toISOString(),type:a.error?'error':a.contentChars?'success':'empty',model:model.id,profile:profile.name,provider:provider.label,latencyMs:a.latencyMs,httpStatus:a.httpStatus,contentChars:a.contentChars,message:a.error ? (a.httpStatus ? 'HTTP '+a.httpStatus+': '+a.error : a.error) : (a.contentChars ? 'Visible text returned ('+a.contentChars+' chars)' : 'HTTP success, but no visible text')}); modelRaceProgress.events=modelRaceProgress.events.slice(0,40); }
           if (!a.error && a.contentChars > 0) {
             return { model: model.id, status: profile.name === 'baseline' ? 'alive' : 'adaptive', workingProfile: profile.name, testedVia: provider.label, latencyMs: totalLatency, firstResponseMs: attempts[0] ? attempts[0].latencyMs : null, contentChars: a.contentChars, reasoningChars: a.reasoningChars, finishReason: a.finishReason, preview: a.preview, error: '', attempts: attempts.map(x => ({ profile:x.profile,provider:x.provider,httpStatus:x.httpStatus,latencyMs:x.latencyMs,contentChars:x.contentChars,reasoningChars:x.reasoningChars,finishReason:x.finishReason,error:x.error })) };
           }
@@ -640,14 +651,18 @@ app.post('/admin/api/models/race', async (req, res) => {
       while (true) {
         const index = cursor++;
         if (index >= allModels.length) break;
+        if (modelRaceProgress) { modelRaceProgress.activeModel=allModels[index].id; modelRaceProgress.activeProfile='starting'; }
         try { results[index] = await testModel(allModels[index]); }
         catch (error) { results[index] = { model:allModels[index].id,status:'error',workingProfile:'',testedVia:'',latencyMs:0,firstResponseMs:null,contentChars:0,reasoningChars:0,finishReason:null,preview:'',error:cleanProviderError(error),attempts:[] }; }
+        if (modelRaceProgress) { modelRaceProgress.results=results.filter(Boolean); modelRaceProgress.completed=modelRaceProgress.results.length; modelRaceProgress.summary={total:allModels.length,alive:0,adaptive:0,reasoningOnly:0,empty:0,error:0}; modelRaceProgress.results.forEach(r=>{if(r.status==='alive')modelRaceProgress.summary.alive++;else if(r.status==='adaptive')modelRaceProgress.summary.adaptive++;else if(r.status==='reasoning-only')modelRaceProgress.summary.reasoningOnly++;else if(r.status==='empty')modelRaceProgress.summary.empty++;else modelRaceProgress.summary.error++;}); modelRaceProgress.events.unshift({at:new Date().toISOString(),type:'model-done',model:results[index].model,status:results[index].status,latencyMs:results[index].latencyMs,message:results[index].status.toUpperCase().replace('-',' ') }); modelRaceProgress.events=modelRaceProgress.events.slice(0,40); }
       }
     }));
     const summary = { total:results.length,alive:0,adaptive:0,reasoningOnly:0,empty:0,error:0 };
     results.forEach(r => { if(r.status==='alive')summary.alive++;else if(r.status==='adaptive')summary.adaptive++;else if(r.status==='reasoning-only')summary.reasoningOnly++;else if(r.status==='empty')summary.empty++;else summary.error++; });
-    res.json({ startedAt,finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,fetchedAt:catalogue.fetchedAt,summary,results });
-  } catch (error) { res.status(error.status || 502).json({ error:error.message || 'Model race failed.',providers:error.modelResults || [] }); }
+    const report={ startedAt,finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,fetchedAt:catalogue.fetchedAt,summary,results };
+    modelRaceProgress.running=false; modelRaceProgress.phase='complete'; modelRaceProgress.finishedAt=report.finishedAt; modelRaceProgress.durationMs=report.durationMs; modelRaceProgress.summary=summary; modelRaceProgress.results=results; modelRaceProgress.activeModel=''; modelRaceProgress.activeProfile=''; modelRaceProgress.events.unshift({at:report.finishedAt,type:'complete',message:'Race complete.'});
+    res.json(report);
+  } catch (error) { if(modelRaceProgress){modelRaceProgress.running=false;modelRaceProgress.phase='failed';modelRaceProgress.error=error.message||'Model race failed.';modelRaceProgress.events.unshift({at:new Date().toISOString(),type:'error',message:modelRaceProgress.error});} res.status(error.status || 502).json({ error:error.message || 'Model race failed.',providers:error.modelResults || [] }); }
 });
 
 app.all('*', (req, res) => {
