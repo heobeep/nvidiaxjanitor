@@ -214,7 +214,8 @@ document.body.addEventListener('click',function(e){
  if(action==='save-rename'){var id=formValue('renameId'),label=formValue('renameLabel');if(!label.trim()){toast('Label is required','bad');return}api('/admin/api/keys/clients/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({label:label})}).then(function(){closeModal();toast('Key label updated');return reloadState('clients')}).catch(function(err){toast(err.message,'bad')});return}
  if(action==='logout'){api('/admin/api/logout',{method:'POST',body:'{}'}).then(function(){state=null;setLogin(true);toast('Signed out','good')}).catch(function(err){toast(err.message,'bad')});return}
 });
-document.getElementById('modalRoot').addEventListener('click',function(e){if(e.target.dataset.closeModal==='true')closeModal();var secret=e.target.closest('[data-copy-secret]');if(secret)copy(secret.dataset.copySecret)});\ndocument.getElementById('modalRoot').addEventListener('submit',function(e){e.preventDefault()});
+document.getElementById('modalRoot').addEventListener('click',function(e){if(e.target.dataset.closeModal==='true')closeModal();var secret=e.target.closest('[data-copy-secret]');if(secret)copy(secret.dataset.copySecret)});
+document.getElementById('modalRoot').addEventListener('submit',function(e){e.preventDefault()});
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal()});
 document.querySelector('#page').addEventListener('submit',function(e){e.preventDefault()});
 document.getElementById('page').addEventListener('input',function(e){if(e.target.id==='modelSearch'){var query=e.target.value;var caret=e.target.selectionStart;var page=document.getElementById('page');var scroll=window.scrollY;page.innerHTML=renderModels();var n=document.getElementById('modelSearch');if(n){n.focus();n.setSelectionRange(caret,caret)}window.scrollTo(0,scroll)}});
