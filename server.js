@@ -9,6 +9,8 @@ const fs = require('fs/promises');
 const path = require('path');
 const { applyModelPolicy, isNemotronLightning } = require('./lib/model-policy');
 const { isRetryableStatus, retryAfterMs } = require('./lib/retry-policy');
+const { StringDecoder } = require('string_decoder');
+const { createThinkTagStripper } = require('./lib/stream-utils');
 
 const app = express();
 let modelRaceProgress = null;
@@ -550,6 +552,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
       let buffer = '';
+      const decoder = new StringDecoder('utf8');
+      const stripInlineThink = createThinkTagStripper();
       function forwardSseLine(line) {
         const normalized = line.replace(/\r$/, '');
         if (!normalized) { res.write('\n'); return; }
@@ -561,7 +565,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (data.choices && data.choices[0] && data.choices[0].delta) {
             const delta = data.choices[0].delta;
             const raw = delta.content || '';
-            if (raw) delta.content = stripThinkTags(raw, false);
+            if (raw) delta.content = stripInlineThink(raw);
             else delete delta.content;
             if (!state.settings.show_reasoning) delete delta.reasoning_content;
             if (raw && !delta.content) delete delta.content;
@@ -573,7 +577,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       }
       response.data.on('data', chunk => {
-        buffer += chunk.toString('utf8');
+        buffer += decoder.write(chunk);
         let newline;
         while ((newline = buffer.search(/\r?\n/)) !== -1) {
           const separatorLength = buffer[newline] === '\r' ? 2 : 1;
@@ -583,6 +587,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       });
       response.data.on('end', () => {
+        buffer += decoder.end();
         if (buffer.length) forwardSseLine(buffer);
         res.end();
       });
