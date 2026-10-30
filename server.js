@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
 const { applyModelPolicy, isNemotronLightning } = require('./lib/model-policy');
+const { isRetryableStatus, retryAfterMs } = require('./lib/retry-policy');
 
 const app = express();
 let modelRaceProgress = null;
@@ -164,19 +165,40 @@ function cleanProviderError(error) {
 }
 function isRetryable(error) {
   const status = error && error.response && error.response.status;
-  return !status || [401, 403, 404, 408, 425, 429, 500, 502, 503, 504].includes(status);
+  return isRetryableStatus(status);
 }
-function providerOrder() {
+function providerOrder(modelId) {
   const enabled = state.providerKeys.filter(k => k.enabled !== false);
   if (!enabled.length) return [];
   const now = Date.now();
-  const ready = enabled.filter(k => !k.cooldownUntil || Date.parse(k.cooldownUntil) <= now);
-  const candidates = ready.length ? ready : enabled.slice().sort((a, b) => Date.parse(a.cooldownUntil || 0) - Date.parse(b.cooldownUntil || 0));
-  const offset = roundRobinCursor++ % candidates.length;
-  return candidates.slice(offset).concat(candidates.slice(0, offset));
+  const rotate = list => {
+    if (!list.length) return [];
+    const offset = roundRobinCursor++ % list.length;
+    return list.slice(offset).concat(list.slice(0, offset));
+  };
+
+  // Prefer keys whose last model-catalog response confirmed access to this
+  // model, but retain the rest of the pool as failover candidates.
+  const model = modelCache.data && Array.isArray(modelCache.data.models)
+    ? modelCache.data.models.find(item => item.id === modelId)
+    : null;
+  if (model && Array.isArray(model.available_via) && model.available_via.length) {
+    const preferred = enabled.filter(key => model.available_via.includes(key.label));
+    const fallback = enabled.filter(key => !model.available_via.includes(key.label));
+    const preferredReady = preferred.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+    const fallbackReady = fallback.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+    if (preferredReady.length) return rotate(preferredReady).concat(fallbackReady);
+    if (fallbackReady.length) return rotate(fallbackReady);
+  }
+
+  const ready = enabled.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+  const candidates = ready.length
+    ? ready
+    : enabled.slice().sort((a, b) => Date.parse(a.cooldownUntil || 0) - Date.parse(b.cooldownUntil || 0));
+  return rotate(candidates);
 }
 async function requestWithFailover(method, endpoint, body, responseType) {
-  const candidates = providerOrder();
+  const candidates = providerOrder(body && body.model);
   if (!candidates.length) {
     const e = new Error('Add an NVIDIA NIM API key in the control panel first.');
     e.status = 503;
@@ -207,8 +229,7 @@ async function requestWithFailover(method, endpoint, body, responseType) {
       provider.lastStatus = status || null;
       provider.lastError = cleanProviderError(error);
       if (status === 429) {
-        const retryAfter = Number(error.response.headers && error.response.headers['retry-after']);
-        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 60 * 60 * 1000) : 60000;
+        const waitMs = retryAfterMs(error.response.headers && error.response.headers['retry-after']);
         provider.cooldownUntil = new Date(Date.now() + waitMs).toISOString();
       } else if (status === 401) {
         provider.cooldownUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
