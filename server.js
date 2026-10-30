@@ -40,7 +40,6 @@ const DEFAULT_SETTINGS = {
   nemotron35_enabled: true,
   nemotron35_enable_thinking: true,
   nemotron35_reasoning_budget: 2048,
-  nemotron35_repetition_penalty: 1.05,
   nemotron35_temperature: 1,
   nemotron35_top_p: 0.95
 };
@@ -391,7 +390,6 @@ app.put('/admin/api/settings', async (req, res) => {
     ['temperature', 0, 2], ['max_tokens', 1, 131072],
     ['top_p', 0, 1], ['presence_penalty', -2, 2], ['frequency_penalty', -2, 2],
     ['nemotron35_reasoning_budget', -1, 32768],
-    ['nemotron35_repetition_penalty', 0, 2],
     ['nemotron35_temperature', 0, 1],
     ['nemotron35_top_p', 0, 1]
   ];
