@@ -1,0 +1,25 @@
+name: Proxy checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - name: Check JavaScript syntax
+        run: |
+          node --check server.js
+          node --check lib/model-policy.js
+          node --check lib/retry-policy.js
+      - name: Run unit tests
+        run: npm test
