@@ -21,5 +21,7 @@ jobs:
           node --check server.js
           node --check lib/model-policy.js
           node --check lib/retry-policy.js
+          node --check lib/stream-utils.js
+          node scripts/check-admin.js
       - name: Run unit tests
         run: npm test
