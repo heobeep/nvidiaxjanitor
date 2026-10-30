@@ -7,7 +7,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
-const { applyModelPolicy, isNemotronLightning } = require('./lib/model-policy');
+const { applyModelPolicy, isNemotronLightning, isMistralLarge4 } = require('./lib/model-policy');
 const { isRetryableStatus, retryAfterMs } = require('./lib/retry-policy');
 const { StringDecoder } = require('string_decoder');
 const { createThinkTagStripper } = require('./lib/stream-utils');
@@ -682,10 +682,17 @@ app.post('/admin/api/models/race', async (req, res) => {
       if (profile.thinkingOff) {
         const extra = Object.assign({}, body.extra_body || {});
         const template = Object.assign({}, extra.chat_template_kwargs || {});
-        if (isNemotronLightning(modelId)) template.enable_thinking = false;
-        else template.thinking = false;
-        extra.chat_template_kwargs = template;
-        body.extra_body = extra;
+        if (isNemotronLightning(modelId)) {
+          template.enable_thinking = false;
+          extra.chat_template_kwargs = template;
+          body.extra_body = extra;
+        } else if (isMistralLarge4(modelId)) {
+          body.reasoning_effort = 'none';
+        } else {
+          template.thinking = false;
+          extra.chat_template_kwargs = template;
+          body.extra_body = extra;
+        }
       }
       const t0 = Date.now();
       if (modelRaceProgress) { modelRaceProgress.activeModel=modelId; modelRaceProgress.activeProfile=profile.name; modelRaceProgress.activeProvider=provider.label; }
