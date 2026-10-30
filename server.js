@@ -7,6 +7,10 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
+const { applyModelPolicy, isNemotronLightning, isMistralLarge4 } = require('./lib/model-policy');
+const { isRetryableStatus, retryAfterMs } = require('./lib/retry-policy');
+const { StringDecoder } = require('string_decoder');
+const { createThinkTagStripper } = require('./lib/stream-utils');
 
 const app = express();
 let modelRaceProgress = null;
@@ -28,8 +32,16 @@ const DEFAULT_SETTINGS = {
   presence_penalty: 0,
   frequency_penalty: 0,
   default_model: '',
+  mistral_large4_enabled: true,
+  mistral_large4_reasoning_effort: 'medium',
+  mistral_large4_override_reasoning_effort: false,
   show_reasoning: true,
-  thinking_mode: true
+  thinking_mode: true,
+  nemotron35_enabled: true,
+  nemotron35_enable_thinking: true,
+  nemotron35_reasoning_budget: 2048,
+  nemotron35_temperature: 1,
+  nemotron35_top_p: 0.95
 };
 
 let state;
@@ -157,19 +169,40 @@ function cleanProviderError(error) {
 }
 function isRetryable(error) {
   const status = error && error.response && error.response.status;
-  return !status || [401, 403, 404, 408, 425, 429, 500, 502, 503, 504].includes(status);
+  return isRetryableStatus(status);
 }
-function providerOrder() {
+function providerOrder(modelId) {
   const enabled = state.providerKeys.filter(k => k.enabled !== false);
   if (!enabled.length) return [];
   const now = Date.now();
-  const ready = enabled.filter(k => !k.cooldownUntil || Date.parse(k.cooldownUntil) <= now);
-  const candidates = ready.length ? ready : enabled.slice().sort((a, b) => Date.parse(a.cooldownUntil || 0) - Date.parse(b.cooldownUntil || 0));
-  const offset = roundRobinCursor++ % candidates.length;
-  return candidates.slice(offset).concat(candidates.slice(0, offset));
+  const rotate = list => {
+    if (!list.length) return [];
+    const offset = roundRobinCursor++ % list.length;
+    return list.slice(offset).concat(list.slice(0, offset));
+  };
+
+  // Prefer keys whose last model-catalog response confirmed access to this
+  // model, but retain the rest of the pool as failover candidates.
+  const model = modelCache.data && Array.isArray(modelCache.data.models)
+    ? modelCache.data.models.find(item => item.id === modelId)
+    : null;
+  if (model && Array.isArray(model.available_via) && model.available_via.length) {
+    const preferred = enabled.filter(key => model.available_via.includes(key.label));
+    const fallback = enabled.filter(key => !model.available_via.includes(key.label));
+    const preferredReady = preferred.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+    const fallbackReady = fallback.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+    if (preferredReady.length) return rotate(preferredReady).concat(fallbackReady);
+    if (fallbackReady.length) return rotate(fallbackReady);
+  }
+
+  const ready = enabled.filter(key => !key.cooldownUntil || Date.parse(key.cooldownUntil) <= now);
+  const candidates = ready.length
+    ? ready
+    : enabled.slice().sort((a, b) => Date.parse(a.cooldownUntil || 0) - Date.parse(b.cooldownUntil || 0));
+  return rotate(candidates);
 }
 async function requestWithFailover(method, endpoint, body, responseType) {
-  const candidates = providerOrder();
+  const candidates = providerOrder(body && body.model);
   if (!candidates.length) {
     const e = new Error('Add an NVIDIA NIM API key in the control panel first.');
     e.status = 503;
@@ -200,8 +233,7 @@ async function requestWithFailover(method, endpoint, body, responseType) {
       provider.lastStatus = status || null;
       provider.lastError = cleanProviderError(error);
       if (status === 429) {
-        const retryAfter = Number(error.response.headers && error.response.headers['retry-after']);
-        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 60 * 60 * 1000) : 60000;
+        const waitMs = retryAfterMs(error.response.headers && error.response.headers['retry-after']);
         provider.cooldownUntil = new Date(Date.now() + waitMs).toISOString();
       } else if (status === 401) {
         provider.cooldownUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
@@ -356,7 +388,10 @@ app.put('/admin/api/settings', async (req, res) => {
   const next = Object.assign({}, state.settings);
   const numeric = [
     ['temperature', 0, 2], ['max_tokens', 1, 131072],
-    ['top_p', 0, 1], ['presence_penalty', -2, 2], ['frequency_penalty', -2, 2]
+    ['top_p', 0, 1], ['presence_penalty', -2, 2], ['frequency_penalty', -2, 2],
+    ['nemotron35_reasoning_budget', -1, 32768],
+    ['nemotron35_temperature', 0, 1],
+    ['nemotron35_top_p', 0, 1]
   ];
   for (const item of numeric) {
     if (input[item[0]] !== undefined) {
@@ -366,8 +401,14 @@ app.put('/admin/api/settings', async (req, res) => {
     }
   }
   if (input.default_model !== undefined) next.default_model = String(input.default_model).slice(0, 200);
-  if (input.show_reasoning !== undefined) next.show_reasoning = Boolean(input.show_reasoning);
-  if (input.thinking_mode !== undefined) next.thinking_mode = Boolean(input.thinking_mode);
+  if (input.mistral_large4_reasoning_effort !== undefined) {
+    const effort = String(input.mistral_large4_reasoning_effort).toLowerCase();
+    if (!['low', 'medium', 'high', 'none'].includes(effort)) return res.status(400).json({ error: 'Invalid Mistral Large 4 reasoning effort.' });
+    next.mistral_large4_reasoning_effort = effort;
+  }
+  for (const name of ['show_reasoning', 'thinking_mode', 'nemotron35_enabled', 'nemotron35_enable_thinking', 'mistral_large4_enabled', 'mistral_large4_override_reasoning_effort']) {
+    if (input[name] !== undefined) next[name] = Boolean(input[name]);
+  }
   state.settings = next;
   await persistState();
   res.json({ ok: true, settings: state.settings });
@@ -487,17 +528,22 @@ app.post('/v1/chat/completions', async (req, res) => {
     return res.status(400).json({ error: { message: 'messages must be an array.', type: 'invalid_request_error', code: 400 } });
   }
   const stream = Boolean(body.stream);
-  const extraBody = Object.assign({}, body.extra_body || {});
+  // Apply model-aware defaults only when the client has not supplied its own.
+  // This does not append system prompts or rewrite the conversation messages.
+  const preparedBody = applyModelPolicy(body, model, state.settings);
+  const extraBody = Object.assign({}, preparedBody.extra_body || {});
   if (state.settings.thinking_mode && model.startsWith('openai/gpt-oss')) {
-    extraBody.chat_template_kwargs = Object.assign({}, extraBody.chat_template_kwargs || {}, { thinking: true });
+    const chatTemplate = Object.assign({}, extraBody.chat_template_kwargs || {});
+    if (chatTemplate.thinking === undefined) chatTemplate.thinking = true;
+    extraBody.chat_template_kwargs = chatTemplate;
   }
-  const nimRequest = Object.assign({}, body, {
+  const nimRequest = Object.assign({}, preparedBody, {
     model,
-    temperature: body.temperature ?? state.settings.temperature,
-    max_tokens: body.max_tokens ?? state.settings.max_tokens,
-    top_p: body.top_p ?? state.settings.top_p,
-    presence_penalty: body.presence_penalty ?? state.settings.presence_penalty,
-    frequency_penalty: body.frequency_penalty ?? state.settings.frequency_penalty,
+    temperature: preparedBody.temperature ?? state.settings.temperature,
+    max_tokens: preparedBody.max_tokens ?? state.settings.max_tokens,
+    top_p: preparedBody.top_p ?? state.settings.top_p,
+    presence_penalty: preparedBody.presence_penalty ?? state.settings.presence_penalty,
+    frequency_penalty: preparedBody.frequency_penalty ?? state.settings.frequency_penalty,
     extra_body: Object.keys(extraBody).length ? extraBody : undefined,
     stream
   });
@@ -512,46 +558,71 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
       let buffer = '';
+      const decoder = new StringDecoder('utf8');
+      const stripInlineThink = createThinkTagStripper();
+      function forwardSseLine(line) {
+        const normalized = line.replace(/\r$/, '');
+        if (!normalized) { res.write('\n'); return; }
+        if (!normalized.startsWith('data:')) { res.write(normalized + '\n'); return; }
+        const rawData = normalized.slice(5).replace(/^\s+/, '');
+        if (rawData === '[DONE]') { res.write('data: [DONE]\n\n'); return; }
+        try {
+          const data = JSON.parse(rawData);
+          if (data.choices && data.choices[0] && data.choices[0].delta) {
+            const delta = data.choices[0].delta;
+            const raw = delta.content || '';
+            if (raw) delta.content = stripInlineThink(raw);
+            else delete delta.content;
+            if (!state.settings.show_reasoning) delete delta.reasoning_content;
+            if (raw && !delta.content) delete delta.content;
+          }
+          res.write('data: ' + JSON.stringify(data) + '\n\n');
+        } catch (_) {
+          // Keep non-JSON SSE payloads intact; never silently discard provider events.
+          res.write(normalized + '\n\n');
+        }
+      }
       response.data.on('data', chunk => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) { res.write(line + '\n'); continue; }
-          if (line.includes('[DONE]')) { res.write(line + '\n\n'); continue; }
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.choices && data.choices[0] && data.choices[0].delta) {
-              const delta = data.choices[0].delta;
-              const raw = delta.content || '';
-              if (raw) delta.content = stripThinkTags(raw, false);
-              else delete delta.content;
-              if (!state.settings.show_reasoning) delete delta.reasoning_content;
-              if (raw && !delta.content) delete delta.content;
-            }
-            res.write('data: ' + JSON.stringify(data) + '\n\n');
-          } catch (_) { res.write(line + '\n\n'); }
+        buffer += decoder.write(chunk);
+        let newline;
+        while ((newline = buffer.search(/\r?\n/)) !== -1) {
+          const separatorLength = buffer[newline] === '\r' ? 2 : 1;
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + separatorLength);
+          forwardSseLine(line);
         }
       });
-      response.data.on('end', () => { if (buffer.trim()) res.write(buffer + '\n'); res.end(); });
+      response.data.on('end', () => {
+        buffer += decoder.end();
+        if (buffer.length) forwardSseLine(buffer);
+        res.end();
+      });
       response.data.on('error', err => { console.error('NIM stream error:', err.message); res.end(); });
       res.on('close', () => { if (!res.writableEnded && response.data && response.data.destroy) response.data.destroy(); });
     } else {
       const payload = response.data || {};
-      const out = {
+      const out = Object.assign({}, payload, {
         id: payload.id || ('chatcmpl-' + Date.now()),
         object: payload.object || 'chat.completion',
         created: payload.created || Math.floor(Date.now() / 1000),
         model,
         choices: (payload.choices || []).map((choice, index) => {
           const raw = choice.message && choice.message.content || '';
-          const message = { role: choice.message && choice.message.role || 'assistant', content: stripThinkTags(raw) };
+          const message = Object.assign({}, choice.message || {}, {
+            role: choice.message && choice.message.role || 'assistant',
+            content: stripThinkTags(raw)
+          });
           const reasoning = (choice.message && choice.message.reasoning_content) || extractThinkTags(raw);
           if (state.settings.show_reasoning && reasoning) message.reasoning_content = reasoning;
-          return { index: choice.index ?? index, message, finish_reason: choice.finish_reason ?? null };
+          else if (!state.settings.show_reasoning) delete message.reasoning_content;
+          return Object.assign({}, choice, {
+            index: choice.index ?? index,
+            message,
+            finish_reason: choice.finish_reason ?? null
+          });
         }),
         usage: payload.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
+      });
       res.json(out);
     }
   } catch (error) {
@@ -601,8 +672,26 @@ app.post('/admin/api/models/race', async (req, res) => {
       const messages = profile.system
         ? [{ role: 'system', content: 'You are a concise assistant. Do not output hidden reasoning. Return visible text only.' }, { role: 'user', content: userPrompt }]
         : [{ role: 'user', content: userPrompt }];
-      const body = { model: modelId, messages, temperature: 0, top_p: 1, max_tokens: profile.max_tokens, stream: false };
-      if (profile.thinkingOff) body.extra_body = { chat_template_kwargs: { thinking: false } };
+      let body = applyModelPolicy(
+        { model: modelId, messages, temperature: 0, top_p: 1, max_tokens: profile.max_tokens, stream: false },
+        modelId,
+        state.settings
+      );
+      if (profile.thinkingOff) {
+        const extra = Object.assign({}, body.extra_body || {});
+        const template = Object.assign({}, extra.chat_template_kwargs || {});
+        if (isNemotronLightning(modelId)) {
+          template.enable_thinking = false;
+          extra.chat_template_kwargs = template;
+          body.extra_body = extra;
+        } else if (isMistralLarge4(modelId)) {
+          body.reasoning_effort = 'none';
+        } else {
+          template.thinking = false;
+          extra.chat_template_kwargs = template;
+          body.extra_body = extra;
+        }
+      }
       const t0 = Date.now();
       if (modelRaceProgress) { modelRaceProgress.activeModel=modelId; modelRaceProgress.activeProfile=profile.name; modelRaceProgress.activeProvider=provider.label; }
       try {
