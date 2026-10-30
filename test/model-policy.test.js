@@ -48,7 +48,7 @@ test('explicit client values win over Nemotron defaults', () => {
 });
 
 test('does not apply Nemotron settings to other models', () => {
-  const input = { model: 'mistralai/mistral-large-4-1t-a52b', messages: [] };
+  const input = { model: 'deepseek-ai/deepseek-v3.2', messages: [] };
   assert.deepEqual(applyModelPolicy(input, input.model, {}), input);
 });
 
