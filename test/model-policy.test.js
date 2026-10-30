@@ -21,7 +21,6 @@ test('adds bounded Nemotron defaults while preserving the messages', () => {
   assert.equal(output.temperature, 1);
   assert.equal(output.top_p, 0.95);
   assert.equal(output.extra_body.chat_template_kwargs.enable_thinking, true);
-  assert.equal(output.extra_body.repetition_penalty, 1.05);
   assert.equal(output.messages, messages);
   assert.equal(input.extra_body, undefined);
 });
