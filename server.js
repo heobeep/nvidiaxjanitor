@@ -32,6 +32,9 @@ const DEFAULT_SETTINGS = {
   presence_penalty: 0,
   frequency_penalty: 0,
   default_model: '',
+  mistral_large4_enabled: true,
+  mistral_large4_reasoning_effort: 'medium',
+  mistral_large4_override_reasoning_effort: false,
   show_reasoning: true,
   thinking_mode: true,
   nemotron35_enabled: true,
@@ -400,7 +403,12 @@ app.put('/admin/api/settings', async (req, res) => {
     }
   }
   if (input.default_model !== undefined) next.default_model = String(input.default_model).slice(0, 200);
-  for (const name of ['show_reasoning', 'thinking_mode', 'nemotron35_enabled', 'nemotron35_enable_thinking']) {
+  if (input.mistral_large4_reasoning_effort !== undefined) {
+    const effort = String(input.mistral_large4_reasoning_effort).toLowerCase();
+    if (!['low', 'medium', 'high', 'none'].includes(effort)) return res.status(400).json({ error: 'Invalid Mistral Large 4 reasoning effort.' });
+    next.mistral_large4_reasoning_effort = effort;
+  }
+  for (const name of ['show_reasoning', 'thinking_mode', 'nemotron35_enabled', 'nemotron35_enable_thinking', 'mistral_large4_enabled', 'mistral_large4_override_reasoning_effort']) {
     if (input[name] !== undefined) next[name] = Boolean(input[name]);
   }
   state.settings = next;
