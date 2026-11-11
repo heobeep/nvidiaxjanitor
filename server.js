@@ -28,8 +28,8 @@ const DEFAULT_SETTINGS = {
   presence_penalty: 0,
   frequency_penalty: 0,
   default_model: '',
-  show_reasoning: true,
-  thinking_mode: true
+  show_reasoning: false,
+  thinking_mode: false
 };
 
 let state;
@@ -123,6 +123,9 @@ async function initializeState() {
     await persistState();
   } else {
     state.settings = Object.assign({}, DEFAULT_SETTINGS, state.settings || {});
+    // Reasoning is private provider metadata and must never reach JanitorAI.
+    state.settings.show_reasoning = false;
+    state.settings.thinking_mode = false;
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
     if (!state.adminPasswordHash) {
@@ -291,13 +294,38 @@ function publicState(req) {
   };
 }
 function stripThinkTags(text, trim) {
-  if (!text) return text;
-  const result = String(text).replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').replace(/<\/?think(?:ing)?>/gi, '');
+  if (text == null) return text;
+  const result = String(text)
+    .replace(/<think(?:ing)?>[\\s\\S]*?<\\/think(?:ing)?>/gi, '')
+    .replace(/<\\/?think(?:ing)?>/gi, '')
+    .replace(/<\\|(?:analysis|reasoning|thought|scratchpad)\\|>[\\s\\S]*?(?=<\\|(?:final|answer)\\|>|$)/gi, '')
+    .replace(/<\\|(?:final|answer)\\|>/gi, '');
   return trim === false ? result : result.trim();
 }
-function extractThinkTags(text) {
-  const match = String(text || '').match(/<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/i);
-  return match ? match[1].trim() : null;
+function cleanAssistantMessage(message) {
+  const clean = Object.assign({}, message || {});
+  delete clean.reasoning;
+  delete clean.reasoning_content;
+  delete clean.thinking;
+  delete clean.analysis;
+  if (typeof clean.content === 'string') clean.content = stripThinkTags(clean.content);
+  else if (Array.isArray(clean.content)) clean.content = clean.content.map(part => {
+    if (!part || typeof part !== 'object') return part;
+    const next = Object.assign({}, part);
+    if (typeof next.text === 'string') next.text = stripThinkTags(next.text);
+    return next;
+  });
+  return clean;
+}
+function cleanCompletionChunk(data) {
+  if (!data || !Array.isArray(data.choices)) return data;
+  data.choices = data.choices.map(choice => {
+    const next = Object.assign({}, choice);
+    if (next.delta) next.delta = cleanAssistantMessage(next.delta);
+    if (next.message) next.message = cleanAssistantMessage(next.message);
+    return next;
+  });
+  return data;
 }
 function sendAdminHtml(req, res) {
   res.set('Cache-Control', 'no-store');
@@ -512,29 +540,32 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
       let buffer = '';
-      response.data.on('data', chunk => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) { res.write(line + '\n'); continue; }
-          if (line.includes('[DONE]')) { res.write(line + '\n\n'); continue; }
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.choices && data.choices[0] && data.choices[0].delta) {
-              const delta = data.choices[0].delta;
-              const raw = delta.content || '';
-              if (raw) delta.content = stripThinkTags(raw, false);
-              else delete delta.content;
-              if (!state.settings.show_reasoning) delete delta.reasoning_content;
-              if (raw && !delta.content) delete delta.content;
-            }
-            res.write('data: ' + JSON.stringify(data) + '\n\n');
-          } catch (_) { res.write(line + '\n\n'); }
+      function emitSseFrame(frame) {
+        const dataLines = frame.split(/\\r?\\n/).filter(line => line.startsWith('data:'));
+        if (!dataLines.length) return;
+        const raw = dataLines.map(line => line.slice(5).replace(/^ /, '')).join('\\n');
+        if (raw.trim() === '[DONE]') { res.write('data: [DONE]\\n\\n'); return; }
+        try {
+          const data = cleanCompletionChunk(JSON.parse(raw));
+          res.write('data: ' + JSON.stringify(data) + '\\n\\n');
+        } catch (_) {
+          console.warn('Dropped malformed upstream SSE frame');
         }
+      }
+      response.data.on('data', chunk => {
+        buffer += chunk.toString('utf8');
+        const frames = buffer.split(/\\r?\\n\\r?\\n/);
+        buffer = frames.pop() || '';
+        for (const frame of frames) emitSseFrame(frame);
       });
-      response.data.on('end', () => { if (buffer.trim()) res.write(buffer + '\n'); res.end(); });
-      response.data.on('error', err => { console.error('NIM stream error:', err.message); res.end(); });
+      response.data.on('end', () => {
+        if (buffer.trim()) emitSseFrame(buffer);
+        res.end();
+      });
+      response.data.on('error', err => {
+        console.error('NIM stream error:', err.message);
+        if (!res.writableEnded) res.end();
+      });
       res.on('close', () => { if (!res.writableEnded && response.data && response.data.destroy) response.data.destroy(); });
     } else {
       const payload = response.data || {};
@@ -543,13 +574,12 @@ app.post('/v1/chat/completions', async (req, res) => {
         object: payload.object || 'chat.completion',
         created: payload.created || Math.floor(Date.now() / 1000),
         model,
-        choices: (payload.choices || []).map((choice, index) => {
-          const raw = choice.message && choice.message.content || '';
-          const message = { role: choice.message && choice.message.role || 'assistant', content: stripThinkTags(raw) };
-          const reasoning = (choice.message && choice.message.reasoning_content) || extractThinkTags(raw);
-          if (state.settings.show_reasoning && reasoning) message.reasoning_content = reasoning;
-          return { index: choice.index ?? index, message, finish_reason: choice.finish_reason ?? null };
-        }),
+        choices: (payload.choices || []).map((choice, index) => ({
+          index: choice.index ?? index,
+          message: cleanAssistantMessage(Object.assign({ role: 'assistant' }, choice.message || {})),
+          finish_reason: choice.finish_reason ?? null,
+          ...(choice.logprobs !== undefined ? { logprobs: choice.logprobs } : {})
+        })),
         usage: payload.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
       res.json(out);
