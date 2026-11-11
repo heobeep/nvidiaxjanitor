@@ -26,9 +26,7 @@ const ENCRYPTION_KEY = Buffer.from(process.env.DATA_ENCRYPTION_KEY || '', 'hex')
 
 const VERIFIED_MODEL_IDS = [
   'nvidia/nemotron-3.5-lightning-30b-a3b',
-  'nvidia/nemotron-3.5-bolt-e4b',
-  'minimaxai/minimax-m3.1-flash',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
+  'nvidia/nemotron-3.5-bolt-e4b'
 ];
 
 const DEFAULT_SETTINGS = {
