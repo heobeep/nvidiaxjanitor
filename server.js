@@ -999,6 +999,7 @@ if (process.env.ROLEPLAY_QA_TOKEN) {
         }
       }
       report.catalogueCount = catalog.length;
+      report.catalogueIds = catalog;
       report.available = candidates.filter(m => catalog.includes(m));
       if (!provider) {
         console.error('[ROLEPLAY_BENCHMARK] ' + JSON.stringify(Object.assign(report, { error: 'No NVIDIA provider key could fetch the model catalogue.' })));
