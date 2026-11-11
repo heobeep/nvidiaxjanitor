@@ -183,7 +183,7 @@ function providerOrder() {
   const offset = roundRobinCursor++ % candidates.length;
   return candidates.slice(offset).concat(candidates.slice(0, offset));
 }
-async function requestWithFailover(method, endpoint, body, responseType) {
+async function requestWithFailover(method, endpoint, body, responseType, timeoutMs) {
   const candidates = providerOrder();
   if (!candidates.length) {
     const e = new Error('Add an NVIDIA NIM API key in the control panel first.');
@@ -200,7 +200,7 @@ async function requestWithFailover(method, endpoint, body, responseType) {
         data: body,
         headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
         responseType: responseType || 'json',
-        timeout: responseType === 'stream' ? 0 : 60000,
+        timeout: responseType === 'stream' ? 0 : (Number(timeoutMs) || 60000),
         validateStatus: status => status >= 200 && status < 300
       });
       provider.lastStatus = response.status;
@@ -709,6 +709,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     metrics.failures++;
     return res.status(400).json({ error: { message: 'messages must be an array.', type: 'invalid_request_error', code: 400 } });
   }
+  const verifiedIds = new Set((state.verifiedModelIds && state.verifiedModelIds.length) ? state.verifiedModelIds : VERIFIED_MODEL_IDS);
+  if (!verifiedIds.has(model)) {
+    metrics.failures++;
+    return res.status(400).json({ error: { message: 'This model has not passed the live NVIDIA availability check. Refresh the model list in JanitorAI and select one of the verified models.', type: 'invalid_request_error', code: 400 } });
+  }
   const searchConfig = state.webSearch || { enabled: false, auto: true, apiKey: '' };
   const searchPlan = detectWebSearch(body.messages, searchConfig.auto !== false);
   let searchUsed = false;
@@ -755,7 +760,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     stream
   });
   try {
-    const routed = await requestWithFailover('POST', '/chat/completions', nimRequest, stream ? 'stream' : 'json');
+    const routed = await requestWithFailover('POST', '/chat/completions', nimRequest, stream ? 'stream' : 'json', searchPlan.shouldSearch ? 90000 : 60000);
     const response = routed.response;
     metrics.successes++;
     metrics.lastError = null;
@@ -1012,10 +1017,10 @@ if (process.env.QA_RUN_TOKEN) {
           { role: 'user', content: '/search What are the latest important NVIDIA NIM updates in 2026? Give me three useful points with source links and dates.' }
         ];
         try {
-          const searched = await chat(searchMessages, { model: 'minimaxai/minimax-m3.1-flash', temperature: 0.2, max_tokens: 900 });
-          report.tests.push({ name: 'explicit live web search (MiniMax Flash)', ...searched });
+          const searched = await chat(searchMessages, { model: 'nvidia/nemotron-3.5-lightning-30b-a3b', temperature: 0.2, max_tokens: 512 });
+          report.tests.push({ name: 'explicit live web search (Nemotron Lightning)', ...searched });
         } catch (error) {
-          report.tests.push({ name: 'explicit live web search (MiniMax Flash)', error: cleanProviderError(error) });
+          report.tests.push({ name: 'explicit live web search (Nemotron Lightning)', error: cleanProviderError(error) });
         }
 
         const streamStarted = Date.now();
