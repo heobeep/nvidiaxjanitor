@@ -1,20 +1,21 @@
 'use strict';
 
 // Model-specific request normalization for NVIDIA NIM's OpenAI-compatible API.
-// This proxy calls NIM with raw HTTP requests, so provider parameters must be
-// sent at the top level rather than inside an SDK-only extra_body wrapper.
+// NIM is called through raw HTTP, so provider-specific fields must be top-level.
+
+const LIGHTNING = 'nvidia/nemotron-3.5-lightning-30b-a3b';
+const BOLT = 'nvidia/nemotron-3.5-bolt-e4b';
+const NANO_OMNI = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
+const MINIMAX_M31_FLASH = 'minimaxai/minimax-m3.1-flash';
+const MISTRAL_LARGE_4 = 'mistralai/mistral-large-4-1t-a52b';
 
 const ROLEPLAY_REDIRECTS = Object.freeze({
-  // These were the previous Janitor defaults/aliases. Route stale cached
-  // selections away from the slow Mistral path and the agentic MiniMax path
-  // to the live-tested fast reasoning model.
-  'minimaxai/minimax-m3.1-flash': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-  'mistralai/mistral-large-4-1t-a52b': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
+  // Mistral Large 4 repeatedly timed out on this user's NIM endpoint.
+  // Preserve cached Janitor settings but route them to the live-tested model.
+  [MISTRAL_LARGE_4]: LIGHTNING
 });
 
-const MISTRAL_LARGE_4 = 'mistralai/mistral-large-4-1t-a52b';
-const NEMOTRON_NANO_REASONING = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
-const MINIMAX_M31_FLASH = 'minimaxai/minimax-m3.1-flash';
+const ROLEPLAY_FALLBACK_MODELS = Object.freeze([LIGHTNING, BOLT, MINIMAX_M31_FLASH]);
 
 function resolveModel(requestedModel, defaultModel) {
   const requested = (typeof requestedModel === 'string' && requestedModel.trim())
@@ -41,7 +42,9 @@ function buildNimRequest(body, model, settings) {
 
   const isMistralLarge4 = model === MISTRAL_LARGE_4;
   const isMiniMaxFlash = model === MINIMAX_M31_FLASH;
-  const modelSampling = isMistralLarge4 || isMiniMaxFlash;
+  const isLightning = model === LIGHTNING;
+  const isBolt = model === BOLT;
+  const modelSampling = isMistralLarge4 || isMiniMaxFlash || isLightning || isBolt;
 
   const request = Object.assign({}, source, {
     model,
@@ -51,34 +54,42 @@ function buildNimRequest(body, model, settings) {
     stream: Boolean(source.stream)
   });
 
-  // extra_body is a convenience used by some SDKs. It is not unwrapped by
-  // this proxy's direct axios call to NIM; flatten supported fields instead.
+  // extra_body is an SDK convention, not a NIM REST field.
   delete request.extra_body;
-
   if (Object.keys(templateArgs).length) request.chat_template_kwargs = templateArgs;
   else delete request.chat_template_kwargs;
 
   if (isMistralLarge4) {
-    // NVIDIA documents only low/medium/high for this model. "none" is invalid;
-    // it always reasons, and those tokens count toward max_tokens.
     request.reasoning_effort = 'low';
-    // Respect the budget sent by JanitorAI. Forcing 8192 tokens caused long
-    // waits and 499 client disconnects on the production JanitorAI connection.
-    // Mistral Large 4 does not honor chat_template_kwargs.enable_thinking.
     delete request.chat_template_kwargs;
-  } else if (model === NEMOTRON_NANO_REASONING) {
-    // Verified against this deployment's NIM catalogue: this model returns
-    // structured reasoning_content when enable_thinking is set at top level.
+  } else if (isLightning) {
+    // NVIDIA documents reasoning_budget as the control for this model.
+    // A zero budget keeps hidden planning from consuming the RP reply budget.
+    if (config.thinking_mode === true) {
+      const supplied = Number(source.reasoning_budget);
+      const budget = Number.isFinite(supplied) ? supplied : 256;
+      request.reasoning_budget = Math.max(0, Math.min(512, budget));
+    } else {
+      request.reasoning_budget = 0;
+    }
+    delete request.reasoning_effort;
+    delete request.chat_template_kwargs;
+  } else if (model === NANO_OMNI) {
     request.chat_template_kwargs = Object.assign({}, templateArgs, {
-      enable_thinking: config.thinking_mode !== false
+      enable_thinking: config.thinking_mode === true
     });
     delete request.reasoning_effort;
   } else if (isMiniMaxFlash) {
-    // If explicitly used outside the Janitor redirect, disable agentic thinking
-    // using the model's documented chat-template control.
-    request.chat_template_kwargs = Object.assign({}, templateArgs, { thinking_mode: 'disabled' });
+    // Preserve the M3.1 model as an alternative, but disable agentic tool-planning
+    // by default so it cannot spill its tool/control syntax into roleplay.
+    request.chat_template_kwargs = Object.assign({}, templateArgs, {
+      thinking_mode: config.thinking_mode === true ? 'enabled' : 'disabled'
+    });
     delete request.reasoning_effort;
-  } else if (config.thinking_mode && model.startsWith('openai/gpt-oss')) {
+  } else if (isBolt) {
+    delete request.reasoning_effort;
+    // Bolt was clean on the roleplay test without a reasoning/template override.
+  } else if (config.thinking_mode === true && model.startsWith('openai/gpt-oss')) {
     request.reasoning_effort = source.reasoning_effort || 'high';
   }
 
@@ -86,7 +97,13 @@ function buildNimRequest(body, model, settings) {
 }
 
 module.exports = {
+  LIGHTNING,
+  BOLT,
+  NANO_OMNI,
+  MINIMAX_M31_FLASH,
+  MISTRAL_LARGE_4,
   ROLEPLAY_REDIRECTS,
+  ROLEPLAY_FALLBACK_MODELS,
   resolveModel,
   buildNimRequest
 };
