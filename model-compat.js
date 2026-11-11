@@ -7,11 +7,12 @@
 const ROLEPLAY_REDIRECTS = Object.freeze({
   // MiniMax M3.1 Flash is optimized for agentic/coding workflows. JanitorAI
   // roleplay prompts can cause it to emit tool/UI/template control text. Route
-  // old cached Janitor selections to the verified Mistral RP default.
-  'minimaxai/minimax-m3.1-flash': 'mistralai/mistral-large-4-1t-a52b'
+  // old cached Janitor selections to the live-tested fast reasoning model.
+  'minimaxai/minimax-m3.1-flash': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
 });
 
 const MISTRAL_LARGE_4 = 'mistralai/mistral-large-4-1t-a52b';
+const NEMOTRON_NANO_REASONING = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
 const MINIMAX_M31_FLASH = 'minimaxai/minimax-m3.1-flash';
 
 function resolveModel(requestedModel, defaultModel) {
@@ -60,9 +61,17 @@ function buildNimRequest(body, model, settings) {
     // NVIDIA documents only low/medium/high for this model. "none" is invalid;
     // it always reasons, and those tokens count toward max_tokens.
     request.reasoning_effort = 'low';
-    request.max_tokens = Math.max(Number(request.max_tokens) || 0, 8192);
+    // Respect the budget sent by JanitorAI. Forcing 8192 tokens caused long
+    // waits and 499 client disconnects on the production JanitorAI connection.
     // Mistral Large 4 does not honor chat_template_kwargs.enable_thinking.
     delete request.chat_template_kwargs;
+  } else if (model === NEMOTRON_NANO_REASONING) {
+    // Verified against this deployment's NIM catalogue: this model returns
+    // structured reasoning_content when enable_thinking is set at top level.
+    request.chat_template_kwargs = Object.assign({}, templateArgs, {
+      enable_thinking: config.thinking_mode !== false
+    });
+    delete request.reasoning_effort;
   } else if (isMiniMaxFlash) {
     // If explicitly used outside the Janitor redirect, disable agentic thinking
     // using the model's documented chat-template control.
