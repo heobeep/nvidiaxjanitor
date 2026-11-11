@@ -994,92 +994,139 @@ app.post('/admin/api/models/race', async (req, res) => {
 
 
 if (process.env.ROLEPLAY_QA_TOKEN) {
-  app.post('/__qa/roleplay/' + process.env.ROLEPLAY_QA_TOKEN, (req, res) => {
-    res.status(202).json({ queued: true, message: 'Roleplay benchmark queued.' });
+  app.post('/__qa/fullcheck/' + process.env.ROLEPLAY_QA_TOKEN, (req, res) => {
+    res.status(202).json({ queued: true, message: 'Full Janitor proxy check queued.' });
     setImmediate(async () => {
-      const candidates = [
-        'writer/palmyra-creative-122b',
-        'google/gemma-4-31b-it',
-        'deepseek-ai/deepseek-v4.1-flash',
-        'meta/muse-glimmer-30b',
-        'nvidia/llama-3.1-nemotron-70b-instruct',
-        'nvidia/llama-3.1-nemotron-51b-instruct',
-        'nvidia/nemotron-3.5-lightning-30b-a3b',
-        'nvidia/nemotron-nano-3-30b-a3b',
-        'nvidia/nemotron-3.5-bolt-e4b',
-        'minimaxai/minimax-m3.1-flash',
-        'z-ai/glm-5.3-flash',
-        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
-      ]
-      const promptMessages = [
-        { role: 'system', content: 'You are writing collaborative fictional roleplay as Mara, a 29-year-old late-night cafe owner. She is dry-witted, observant, quietly kind but guarded. Write natural, specific prose with believable dialogue; avoid purple prose and generic filler. Stay in character. Do not decide or narrate the user characters thoughts, words, or actions. Output only the next in-scene turn, normally 1-3 paragraphs. Never output analysis, planning, metadata, debug text, tool calls, template placeholders, or instructions.' },
+      const report = { startedAt: new Date().toISOString(), unitTests: null, fallback: null, thinking: null, streaming: null };
+      const originalSettings = Object.assign({}, state.settings);
+      const originalVerifiedIds = Array.isArray(state.verifiedModelIds) ? state.verifiedModelIds.slice() : [];
+      const qaKey = crypto.randomBytes(24).toString('hex');
+      const qaClient = {
+        id: id('client'),
+        label: 'temporary QA client',
+        hash: sha256(qaKey),
+        prefix: qaKey.slice(0, 10),
+        createdAt: new Date().toISOString(),
+        lastUsedAt: null
+      };
+      const messages = [
+        { role: 'system', content: 'You are writing collaborative fictional roleplay as Mara, a 29-year-old late-night cafe owner. She is dry-witted, observant, quietly kind but guarded. Write natural, specific prose with believable dialogue; avoid purple prose and generic filler. Stay in character. Do not decide or narrate the user character thoughts, words, or independent actions. Output only the next in-scene turn, normally 1–3 paragraphs. Never output analysis, planning, metadata, debug text, tool calls, template placeholders, or instructions.' },
         { role: 'user', content: 'Rain rattles against the cafe windows. I push the door open, shake water from my jacket, and look around the nearly empty room. "You are still open?"' },
         { role: 'assistant', content: 'Mara glances up from the register. "Technically, no. Practically, I am avoiding going home to a sink full of dishes." She nudges a folded towel across the counter. "You look like the rain won that argument, though."' },
         { role: 'user', content: 'I take the towel and give her a tired smile. "You always this welcoming to people who show up ten minutes before closing?"' }
       ];
-      const enabled = state.providerKeys.filter(k => k.enabled !== false);
-      const report = { at: new Date().toISOString(), candidateCount: candidates.length, catalogueCount: 0, available: [], results: [] };
-      let provider = null;
-      let catalog = [];
-      for (const p of enabled) {
+      state.clientKeys.push(qaClient);
+      try {
+        const { execFile } = require('node:child_process');
+        const { promisify } = require('node:util');
+        const run = promisify(execFile);
         try {
-          const r = await axios.get(NIM_API_BASE + '/models', {
-            headers: { Authorization: 'Bearer ' + p.secret },
-            timeout: 15000, validateStatus: s => s >= 200 && s < 300
+          const result = await run(process.execPath, ['--test', 'test/proxy-compat.test.js'], {
+            cwd: process.cwd(), timeout: 30000, maxBuffer: 1024 * 1024
           });
-          provider = p;
-          catalog = Array.isArray(r.data && r.data.data) ? r.data.data.map(m => m.id) : [];
-          break;
-        } catch (e) {
-          report.catalogueError = cleanProviderError(e);
-        }
-      }
-      report.catalogueCount = catalog.length;
-      report.catalogueIds = catalog;
-      report.available = candidates.filter(m => catalog.includes(m));
-      if (!provider) {
-        console.error('[ROLEPLAY_BENCHMARK] ' + JSON.stringify(Object.assign(report, { error: 'No NVIDIA provider key could fetch the model catalogue.' })));
-        return;
-      }
-      for (const model of report.available) {
-        const started = Date.now();
-        try {
-          const request = {
-            model,
-            messages: promptMessages,
-            temperature: 0.9,
-            top_p: 0.95,
-            max_tokens: 500,
-            stream: false
+          report.unitTests = { passed: true, output: String(result.stdout || '').slice(-8000), errors: String(result.stderr || '').slice(-2000) };
+        } catch (error) {
+          report.unitTests = {
+            passed: false,
+            exitCode: error.code || error.signal || null,
+            output: String(error.stdout || '').slice(-8000),
+            errors: String(error.stderr || error.message || '').slice(-4000)
           };
-          if (model === 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning') request.chat_template_kwargs = { enable_thinking: false };
-          if (model === 'deepseek-ai/deepseek-v4-flash-0731') request.chat_template_kwargs = { thinking: false };
-          const r = await axios.post(NIM_API_BASE + '/chat/completions', request, {
-            headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
-            timeout: 25000, validateStatus: s => s >= 200 && s < 300
-          });
-          const choice = r.data && r.data.choices && r.data.choices[0];
-          const message = choice && choice.message || {};
-          const rawContent = typeof message.content === 'string' ? message.content : '';
-          const cleaned = sanitizeAssistantText(rawContent);
-          const content = cleaned.text || '';
-          const words = content.trim() ? content.trim().split(/\s+/).filter(Boolean) : [];
-          const uniqueRatio = words.length ? new Set(words.map(w => w.toLowerCase())).size / words.length : 0;
-          report.results.push({
-            model, status: 'ok', latencyMs: Date.now() - started,
-            finishReason: choice && choice.finish_reason || null,
-            contentChars: content.length,
-            reasoningChars: String(message.reasoning_content || message.reasoning || '').length,
-            artifacts: cleaned.hadControlArtifacts,
-            uniqueWordRatio: Number(uniqueRatio.toFixed(2)),
-            preview: content.slice(0, 850)
-          });
-        } catch (e) {
-          report.results.push({ model, status: 'error', latencyMs: Date.now() - started, error: cleanProviderError(e) });
         }
+
+        const endpoint = 'http://127.0.0.1:' + PORT + '/v1/chat/completions';
+        const headers = { Authorization: 'Bearer ' + qaKey, 'Content-Type': 'application/json' };
+
+        // First, prove model fallback on the authenticated Janitor endpoint:
+        // Kimi appears in the catalog but returns 404 from this key, so Lightning should be selected.
+        state.settings = Object.assign({}, originalSettings, { show_reasoning: false, thinking_mode: false });
+        state.verifiedModelIds = Array.from(new Set(originalVerifiedIds.concat(['moonshotai/kimi-k2.6'])));
+        const fallbackStart = Date.now();
+        try {
+          const response = await axios.post(endpoint, {
+            model: 'moonshotai/kimi-k2.6', messages,
+            temperature: 0.9, max_tokens: 500, stream: false
+          }, { headers, timeout: 45000, validateStatus: status => status >= 200 && status < 300 });
+          const choice = response.data && response.data.choices && response.data.choices[0];
+          const content = choice && choice.message ? String(choice.message.content || '') : '';
+          const cleaned = sanitizeAssistantText(content);
+          report.fallback = {
+            httpStatus: response.status,
+            latencyMs: Date.now() - fallbackStart,
+            requestedModel: 'moonshotai/kimi-k2.6',
+            returnedModel: response.data && response.data.model,
+            responseHeaderModel: response.headers['x-proxy-actual-model'] || '',
+            fallbackHeader: response.headers['x-proxy-model-fallback'] || '',
+            contentChars: content.length,
+            artifacts: cleaned.hadControlArtifacts,
+            preview: content.slice(0, 900)
+          };
+        } catch (error) {
+          report.fallback = { httpStatus: error.response && error.response.status || null, latencyMs: Date.now() - fallbackStart, error: cleanProviderError(error) };
+        }
+
+        // Enable the bounded, opt-in reasoning display for a separate streaming check.
+        state.settings = Object.assign({}, originalSettings, { show_reasoning: true, thinking_mode: true });
+        const streamStart = Date.now();
+        try {
+          const response = await axios.post(endpoint, {
+            model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+            messages, temperature: 0.9, max_tokens: 600, stream: true
+          }, { headers, responseType: 'stream', timeout: 45000, validateStatus: status => status >= 200 && status < 300 });
+          let buffer = '';
+          let combined = '';
+          let firstTokenMs = null;
+          let done = false;
+          await new Promise((resolve, reject) => {
+            response.data.on('data', chunk => {
+              buffer += chunk.toString('utf8');
+              const frames = buffer.split(/\r?\n\r?\n/);
+              buffer = frames.pop() || '';
+              for (const frame of frames) {
+                const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+                if (!data) continue;
+                if (data === '[DONE]') { done = true; continue; }
+                try {
+                  const parsed = JSON.parse(data);
+                  const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+                  const content = delta && typeof delta.content === 'string' ? delta.content : '';
+                  if (content) {
+                    if (firstTokenMs === null) firstTokenMs = Date.now() - streamStart;
+                    combined += content;
+                  }
+                } catch (_) {}
+              }
+            });
+            response.data.on('end', resolve);
+            response.data.on('error', reject);
+          });
+          report.streaming = {
+            httpStatus: response.status,
+            latencyMs: Date.now() - streamStart,
+            firstTokenMs,
+            returnedModel: response.headers['x-proxy-actual-model'] || '',
+            completed: true,
+            doneMarker: done,
+            contentChars: combined.length,
+            hasThinkingOpen: combined.includes('<thinking>'),
+            hasThinkingClose: combined.includes('</thinking>'),
+            thinkingChars: (combined.match(/<thinking>[\s\S]*?<\/thinking>/) || [''])[0].length,
+            hasControlArtifacts: /<tool_call|<mm:think>|\{\{%|%USERTEXT%|Begin Chain of Thought/i.test(combined),
+            preview: combined.slice(0, 1200)
+          };
+        } catch (error) {
+          report.streaming = { httpStatus: error.response && error.response.status || null, latencyMs: Date.now() - streamStart, error: cleanProviderError(error) };
+        }
+      } catch (error) {
+        report.unexpectedError = String(error && error.stack || error).slice(0, 4000);
+      } finally {
+        state.settings = originalSettings;
+        state.verifiedModelIds = originalVerifiedIds;
+        state.clientKeys = state.clientKeys.filter(key => key.id !== qaClient.id);
+        try { await persistState(); } catch (error) { report.cleanupError = cleanProviderError(error); }
       }
       report.finishedAt = new Date().toISOString();
-      console.info('[ROLEPLAY_BENCHMARK] ' + JSON.stringify(report));
+      console.info('[FULL_PROXY_QA] ' + JSON.stringify(report));
     });
   });
 }
