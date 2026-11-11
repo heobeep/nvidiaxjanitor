@@ -296,10 +296,10 @@ function publicState(req) {
 function stripThinkTags(text, trim) {
   if (text == null) return text;
   const result = String(text)
-    .replace(/<think(?:ing)?>[\\s\\S]*?<\\/think(?:ing)?>/gi, '')
-    .replace(/<\\/?think(?:ing)?>/gi, '')
-    .replace(/<\\|(?:analysis|reasoning|thought|scratchpad)\\|>[\\s\\S]*?(?=<\\|(?:final|answer)\\|>|$)/gi, '')
-    .replace(/<\\|(?:final|answer)\\|>/gi, '');
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<\/?think(?:ing)?>/gi, '')
+    .replace(/<\|(?:analysis|reasoning|thought|scratchpad)\|>[\s\S]*?(?=<\|(?:final|answer)\|>|$)/gi, '')
+    .replace(/<\|(?:final|answer)\|>/gi, '');
   return trim === false ? result : result.trim();
 }
 function cleanAssistantMessage(message) {
