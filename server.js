@@ -377,7 +377,7 @@ function createThoughtStreamFilter() {
       return output;
     },
     flush() {
-      const markers = mode === 'normal' ? openers.concat(closers) : closers;
+      const markers = mode === 'normal' ? openers.concat(closers.filter(marker => marker !== '}}' && marker !== '}}}')) : closers;
       const keep = suffixPrefixLength(pending, markers);
       const output = mode === 'normal' ? pending.slice(0, pending.length - keep) : '';
       pending = '';
