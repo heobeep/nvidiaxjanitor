@@ -10,9 +10,11 @@ const MINIMAX_M31_FLASH = 'minimaxai/minimax-m3.1-flash';
 const MISTRAL_LARGE_4 = 'mistralai/mistral-large-4-1t-a52b';
 
 const ROLEPLAY_REDIRECTS = Object.freeze({
-  // Mistral Large 4 repeatedly timed out on this user's NIM endpoint.
-  // Preserve cached Janitor settings but route them to the live-tested model.
-  [MISTRAL_LARGE_4]: LIGHTNING
+  // These legacy/cached selections either timed out or were poor fits for RP.
+  // Keep Janitor configurations working by routing them to the tested model.
+  [MISTRAL_LARGE_4]: LIGHTNING,
+  [MINIMAX_M31_FLASH]: LIGHTNING,
+  [NANO_OMNI]: LIGHTNING
 });
 
 const ROLEPLAY_FALLBACK_MODELS = Object.freeze([LIGHTNING, BOLT, MINIMAX_M31_FLASH]);
@@ -80,10 +82,10 @@ function buildNimRequest(body, model, settings) {
     });
     delete request.reasoning_effort;
   } else if (isMiniMaxFlash) {
-    // Preserve the M3.1 model as an alternative, but disable agentic tool-planning
-    // by default so it cannot spill its tool/control syntax into roleplay.
+    // MiniMax's agentic thinking previously leaked tool/control syntax into RP.
+    // It remains available as a last-resort fallback, always with thinking off.
     request.chat_template_kwargs = Object.assign({}, templateArgs, {
-      thinking_mode: config.thinking_mode === true ? 'enabled' : 'disabled'
+      thinking_mode: 'disabled'
     });
     delete request.reasoning_effort;
   } else if (isBolt) {
