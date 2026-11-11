@@ -9,6 +9,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { ROLEPLAY_REDIRECTS, resolveModel, buildNimRequest } = require('./model-compat');
 const { sanitizeAssistantText, cleanAssistantMessage: sanitizeAssistantMessage } = require('./response-sanitizer');
+const { toJanitorMessage, createStreamReasoningState, mapReasoningDelta, closeStreamReasoning } = require('./janitor-reasoning');
 
 const app = express();
 let modelRaceProgress = null;
@@ -39,9 +40,9 @@ const DEFAULT_SETTINGS = {
   top_p: 1,
   presence_penalty: 0,
   frequency_penalty: 0,
-  default_model: 'mistralai/mistral-large-4-1t-a52b',
-  show_reasoning: false,
-  thinking_mode: false
+  default_model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+  show_reasoning: true,
+  thinking_mode: true
 };
 
 let state;
@@ -102,7 +103,7 @@ async function persistState() {
   return saveQueue;
 }
 function emptyState() {
-  return { version: 1, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
+  return { version: 1, reasoningSettingsVersion: 1, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
 }
 async function initializeState() {
   if (ENCRYPTION_KEY.length !== 32) throw new Error('DATA_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).');
@@ -139,9 +140,13 @@ async function initializeState() {
     state.verifiedModelIds = Array.isArray(state.verifiedModelIds) && state.verifiedModelIds.length ? state.verifiedModelIds : VERIFIED_MODEL_IDS.slice();
     state.verifiedModelUpdatedAt = state.verifiedModelUpdatedAt || '2026-11-11T14:31:35.384Z';
     state.settings.default_model = state.settings.default_model || DEFAULT_SETTINGS.default_model;
-    // Reasoning is private provider metadata and must never reach JanitorAI.
-    state.settings.show_reasoning = false;
-    state.settings.thinking_mode = false;
+    // Migrate once from the previous build, which forcibly disabled both
+    // switches regardless of the admin UI. Preserve future user choices.
+    if (state.reasoningSettingsVersion !== 1) {
+      state.settings.show_reasoning = process.env.SHOW_REASONING !== 'false';
+      state.settings.thinking_mode = process.env.ENABLE_THINKING_MODE !== 'false';
+      state.reasoningSettingsVersion = 1;
+    }
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
     if (!state.adminPasswordHash) state.adminPasswordHash = sha256(ADMIN_PASSWORD);
@@ -318,6 +323,17 @@ function stripThinkTags(text, trim) {
 function cleanAssistantMessage(message) {
   return sanitizeAssistantMessage(message);
 }
+function sanitizeReasoningText(value) {
+  const result = sanitizeAssistantText(String(value || ''));
+  return result.hadControlArtifacts && result.text.length < 24 ? { text: '' } : result;
+}
+function cleanJanitorAssistantMessage(message) {
+  return toJanitorMessage(message, {
+    showReasoning: Boolean(state && state.settings && state.settings.show_reasoning),
+    cleanAssistantMessage,
+    sanitizeAssistantText: sanitizeReasoningText
+  });
+}
 function cleanCompletionChunk(data) {
   if (!data || !Array.isArray(data.choices)) return data;
   data.choices = data.choices.map(choice => {
@@ -385,32 +401,25 @@ function createThoughtStreamFilter() {
     }
   };
 }
-function cleanStreamingCompletionChunk(data, filters) {
+function cleanStreamingCompletionChunk(data, streams) {
   if (!data || !Array.isArray(data.choices)) return data;
   const copy = Object.assign({}, data);
   copy.choices = data.choices.map((choice, index) => {
     const next = Object.assign({}, choice);
     const choiceId = next.index ?? index;
     if (next.delta && typeof next.delta === 'object') {
-      const delta = Object.assign({}, next.delta);
-      delete delta.reasoning;
-      delete delta.reasoning_content;
-      delete delta.thinking;
-      delete delta.analysis;
-      let filter = filters.get(choiceId);
-      if (!filter) { filter = createThoughtStreamFilter(); filters.set(choiceId, filter); }
-      if (typeof delta.content === 'string') delta.content = filter.push(delta.content);
-      else if (Array.isArray(delta.content)) {
-        delta.content = delta.content.map(part => {
-          if (!part || typeof part !== 'object') return part;
-          const cleanPart = Object.assign({}, part);
-          if (typeof cleanPart.text === 'string') cleanPart.text = filter.push(cleanPart.text);
-          return cleanPart;
-        });
+      let entry = streams.get(choiceId);
+      if (!entry) {
+        entry = { filter: createThoughtStreamFilter(), reasoning: createStreamReasoningState() };
+        streams.set(choiceId, entry);
       }
-      next.delta = delta;
+      next.delta = mapReasoningDelta(next.delta, entry.reasoning, {
+        showReasoning: Boolean(state && state.settings && state.settings.show_reasoning),
+        sanitizeAssistantText: sanitizeReasoningText,
+        filterContent: value => entry.filter.push(value)
+      });
     }
-    if (next.message) next.message = cleanAssistantMessage(next.message);
+    if (next.message) next.message = cleanJanitorAssistantMessage(next.message);
     return next;
   });
   return copy;
@@ -661,6 +670,21 @@ app.delete('/admin/api/keys/clients/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'nvidiaxjanitor',
+    openai_compatible: true,
+    endpoints: ['/v1/models', '/v1/chat/completions'],
+    default_model: state.settings.default_model,
+    thinking_mode: Boolean(state.settings.thinking_mode),
+    show_reasoning: Boolean(state.settings.show_reasoning),
+    provider_keys_configured: state.providerKeys.filter(key => key.enabled !== false).length > 0,
+    client_keys_configured: state.clientKeys.length > 0,
+    uptime_seconds: Math.floor((Date.now() - metrics.startedAt) / 1000)
+  });
+});
+
 app.use('/v1', requireClientKey);
 
 app.get('/v1/models', async (req, res) => {
@@ -745,8 +769,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     res.setHeader('X-Proxy-Actual-Model', model);
   }
   try {
+    const requestStartedAt = Date.now();
     const routed = await requestWithFailover('POST', '/chat/completions', nimRequest, stream ? 'stream' : 'json', searchPlan.shouldSearch ? 90000 : 60000);
     const response = routed.response;
+    console.info('[CHAT] model=' + model + ' stream=' + stream + ' latencyMs=' + (Date.now() - requestStartedAt) + ' thinking=' + Boolean(state.settings.thinking_mode) + ' reasoningDisplay=' + Boolean(state.settings.show_reasoning));
     metrics.successes++;
     metrics.lastError = null;
     if (searchUsed) {
@@ -780,8 +806,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
       response.data.on('end', () => {
         if (buffer.trim()) emitSseFrame(buffer);
-        for (const [choiceIndex, filter] of streamFilters.entries()) {
-          const tail = filter.flush();
+        for (const [choiceIndex, entry] of streamFilters.entries()) {
+          const tail = closeStreamReasoning(entry.reasoning) + entry.filter.flush();
           if (tail) {
             const finalTextChunk = { choices: [{ index: choiceIndex, delta: { content: tail }, finish_reason: null }] };
             res.write('data: ' + JSON.stringify(finalTextChunk) + '\n\n');
@@ -803,7 +829,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: payload.model || model,
         choices: (payload.choices || []).map((choice, index) => ({
           index: choice.index ?? index,
-          message: cleanAssistantMessage(Object.assign({ role: 'assistant' }, choice.message || {})),
+          message: cleanJanitorAssistantMessage(Object.assign({ role: 'assistant' }, choice.message || {})),
           finish_reason: choice.finish_reason ?? null,
           ...(choice.logprobs !== undefined ? { logprobs: choice.logprobs } : {})
         })),
