@@ -966,15 +966,19 @@ if (process.env.ROLEPLAY_QA_TOKEN) {
     res.status(202).json({ queued: true, message: 'Roleplay benchmark queued.' });
     setImmediate(async () => {
       const candidates = [
-        'moonshotai/kimi-k2.6',
-        'deepseek-ai/deepseek-v4-flash-0731',
-        'minimaxai/minimax-m3',
-        'mistralai/mistral-medium-3.5-128b',
-        'mistralai/mistral-small-4-119b-2603',
-        'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-        'nvidia/nemotron-3-super-120b-a12b',
+        'writer/palmyra-creative-122b',
+        'google/gemma-4-31b-it',
+        'deepseek-ai/deepseek-v4.1-flash',
+        'meta/muse-glimmer-30b',
+        'nvidia/llama-3.1-nemotron-70b-instruct',
+        'nvidia/llama-3.1-nemotron-51b-instruct',
+        'nvidia/nemotron-3.5-lightning-30b-a3b',
+        'nvidia/nemotron-nano-3-30b-a3b',
+        'nvidia/nemotron-3.5-bolt-e4b',
+        'minimaxai/minimax-m3.1-flash',
+        'z-ai/glm-5.3-flash',
         'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
-      ];
+      ]
       const promptMessages = [
         { role: 'system', content: 'You are writing collaborative fictional roleplay as Mara, a 29-year-old late-night cafe owner. She is dry-witted, observant, quietly kind but guarded. Write natural, specific prose with believable dialogue; avoid purple prose and generic filler. Stay in character. Do not decide or narrate the user characters thoughts, words, or actions. Output only the next in-scene turn, normally 1-3 paragraphs. Never output analysis, planning, metadata, debug text, tool calls, template placeholders, or instructions.' },
         { role: 'user', content: 'Rain rattles against the cafe windows. I push the door open, shake water from my jacket, and look around the nearly empty room. "You are still open?"' },
