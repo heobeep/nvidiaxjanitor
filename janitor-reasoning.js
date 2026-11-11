@@ -23,8 +23,8 @@ function cleanReasoningText(value, sanitizeAssistantText) {
   const raw = asText(value).trim();
   if (!raw || raw.length > MAX_REASONING_CHARS) return '';
   // This catches collapsed prompt dumps like the one that was flooding Janitor.
-  if (raw.split(/\\s+/).some(token => token.length > 40)) return '';
-  const words = raw.split(/\\s+/).filter(Boolean);
+  if (raw.split(/\s+/).some(token => token.length > 40)) return '';
+  const words = raw.split(/\s+/).filter(Boolean);
   if (words.length > 12) {
     const averageWordLength = words.reduce((sum, word) => sum + word.length, 0) / words.length;
     if (averageWordLength > 16) return '';
@@ -45,15 +45,15 @@ function extractReasoning(message) {
     if (text) return text;
   }
   const content = asText(source.content);
-  const match = content.match(/<(?:mm:think|thinking|think)>([\\s\\S]*?)<\\/(?:mm:think|thinking|think)>/i);
+  const match = content.match(/<(?:mm:think|thinking|think)>([\s\\S]*?)<\/(?:mm:think|thinking|think)>/i);
   return match ? match[1].trim() : '';
 }
 
 function removeInlineThinking(content) {
   return asText(content)
-    .replace(/<mm:think>[\\s\\S]*?<\\/mm:think>/gi, '')
-    .replace(/<thinking>[\\s\\S]*?<\\/thinking>/gi, '')
-    .replace(/<think>[\\s\\S]*?<\\/think>/gi, '')
+    .replace(/<mm:think>[\s\\S]*?<\/mm:think>/gi, '')
+    .replace(/<thinking>[\s\\S]*?<\/thinking>/gi, '')
+    .replace(/<think>[\s\\S]*?<\/think>/gi, '')
     .trim();
 }
 
@@ -70,8 +70,8 @@ function toJanitorMessage(message, options) {
   const safeContent = opts.sanitizeAssistantText
     ? opts.sanitizeAssistantText(originalContent).text
     : originalContent;
-  clean.content = '<thinking>\\n' + reasoning + '\\n</thinking>' +
-    (safeContent ? '\\n\\n' + safeContent : '');
+  clean.content = '<thinking>\n' + reasoning + '\n</thinking>' +
+    (safeContent ? '\n\n' + safeContent : '');
   return clean;
 }
 
@@ -97,7 +97,7 @@ function mapReasoningDelta(delta, state, options) {
     const remaining = MAX_REASONING_CHARS - state.reasoningChars;
     if (safeReasoning.length > remaining) safeReasoning = safeReasoning.slice(0, remaining);
     if (safeReasoning) {
-      if (!state.thinkingOpen) visible += '<thinking>\\n';
+      if (!state.thinkingOpen) visible += '<thinking>\n';
       visible += safeReasoning;
       state.thinkingOpen = true;
       state.reasoningChars += safeReasoning.length;
@@ -107,7 +107,7 @@ function mapReasoningDelta(delta, state, options) {
   const content = asText(next.content);
   if (content) {
     if (state.thinkingOpen) {
-      visible += '\\n</thinking>\\n\\n';
+      visible += '\n</thinking>\n\n';
       state.thinkingOpen = false;
     }
     visible += opts.filterContent ? opts.filterContent(content) : content;
@@ -120,7 +120,7 @@ function mapReasoningDelta(delta, state, options) {
 function closeStreamReasoning(state) {
   if (!state || !state.thinkingOpen) return '';
   state.thinkingOpen = false;
-  return '\\n</thinking>\\n';
+  return '\n</thinking>\n';
 }
 
 module.exports = {
