@@ -351,7 +351,7 @@ function createThoughtStreamFilter() {
       pending += String(value || '');
       let output = '';
       while (pending.length) {
-        const markers = mode === 'normal' ? openers.concat(closers) : closers;
+        const markers = mode === 'normal' ? openers.concat(closers.filter(marker => marker !== '}}' && marker !== '}}}')) : closers;
         let markerIndex = -1;
         let matched = '';
         for (const marker of markers) {
