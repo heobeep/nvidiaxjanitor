@@ -10,7 +10,7 @@ Use these values in JanitorAI's custom OpenAI-compatible proxy settings:
 - **API key:** a client key generated in this proxy's Admin → Client keys section (not the NVIDIA API key)
 - **Model:** `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`
 
-Refresh JanitorAI's model list after changing the model. Older cached requests that still name `minimaxai/minimax-m3.1-flash` are redirected to the tested Nemotron Nano model.
+Refresh JanitorAI's model list after changing the model. Older cached requests that still name `minimaxai/minimax-m3.1-flash` or `mistralai/mistral-large-4-1t-a52b` are redirected to the tested Nemotron Nano model.
 
 ## Endpoints
 
