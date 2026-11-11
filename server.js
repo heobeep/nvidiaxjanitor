@@ -541,20 +541,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
       let buffer = '';
       function emitSseFrame(frame) {
-        const dataLines = frame.split(/\\r?\\n/).filter(line => line.startsWith('data:'));
+        const dataLines = frame.split(/\r?\n/).filter(line => line.startsWith('data:'));
         if (!dataLines.length) return;
-        const raw = dataLines.map(line => line.slice(5).replace(/^ /, '')).join('\\n');
-        if (raw.trim() === '[DONE]') { res.write('data: [DONE]\\n\\n'); return; }
+        const raw = dataLines.map(line => line.slice(5).replace(/^ /, '')).join('\n');
+        if (raw.trim() === '[DONE]') { res.write('data: [DONE]\n\n'); return; }
         try {
           const data = cleanCompletionChunk(JSON.parse(raw));
-          res.write('data: ' + JSON.stringify(data) + '\\n\\n');
+          res.write('data: ' + JSON.stringify(data) + '\n\n');
         } catch (_) {
           console.warn('Dropped malformed upstream SSE frame');
         }
       }
       response.data.on('data', chunk => {
         buffer += chunk.toString('utf8');
-        const frames = buffer.split(/\\r?\\n\\r?\\n/);
+        const frames = buffer.split(/\r?\n\r?\n/);
         buffer = frames.pop() || '';
         for (const frame of frames) emitSseFrame(frame);
       });
