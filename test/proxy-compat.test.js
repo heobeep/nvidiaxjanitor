@@ -93,7 +93,7 @@ test('structured reasoning becomes visible only when enabled and fits the safe l
     { role: 'assistant', content: 'Hello there.', reasoning_content: 'I should answer warmly and continue the scene naturally.' },
     { showReasoning: true, cleanAssistantMessage, sanitizeAssistantText }
   );
-  assert.match(result.content, /^<thinking>\\nI should answer warmly/);
+  assert.match(result.content, /^<thinking>\nI should answer warmly/);
   assert.match(result.content, /Hello there\./);
   assert.equal(result.reasoning_content, undefined);
 });
@@ -135,7 +135,7 @@ test('streaming reasoning has a hard maximum and closes before the answer', () =
   );
   assert.match(first.content, /^<thinking>/);
   assert.equal(second.content, undefined);
-  assert.match(third.content, /<\\/thinking>/);
+  assert.match(third.content, /<\/thinking>/);
   assert.ok(state.reasoningChars <= MAX_REASONING_CHARS);
   assert.equal(closeStreamReasoning(state), '');
 });
