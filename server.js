@@ -927,6 +927,54 @@ app.post('/admin/api/models/race', async (req, res) => {
 
 
 
+
+if (process.env.QA_RUN_TOKEN) {
+  app.post('/__qa/probe/:token', (req, res) => {
+    if (!process.env.QA_RUN_TOKEN || !safeEqual(req.params.token, process.env.QA_RUN_TOKEN)) return res.sendStatus(404);
+    res.status(202).json({ accepted: true });
+    (async () => {
+      const startedAt = new Date().toISOString();
+      const catalogue = await refreshModels(true);
+      const available = new Set(catalogue.models.map(m => m.id));
+      const candidates = [
+        'nvidia/nemotron-3.5-lightning-30b-a3b',
+        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+        'openai/gpt-oss-20b',
+        'nvidia/nemotron-3-ultra-550b-a55b',
+        'mistralai/mistral-large-4-1t-a52b'
+      ].filter(id => available.has(id));
+      const provider = providerOrder()[0];
+      if (!provider) throw new Error('No enabled NVIDIA provider is configured.');
+      const tests = await Promise.all(candidates.map(async model => {
+        const body = {
+          model,
+          messages: [{ role: 'user', content: 'Solve this quickly: 19 + 23 = ? Give the answer and a short explanation.' }],
+          temperature: 0.7, top_p: 0.95, max_tokens: 768, stream: false
+        };
+        if (model.startsWith('nvidia/nemotron-')) body.chat_template_kwargs = { enable_thinking: true };
+        if (model.startsWith('openai/gpt-oss-')) body.reasoning_effort = 'low';
+        if (model.startsWith('mistralai/mistral-large-4-1t')) body.reasoning_effort = 'low';
+        const t0 = Date.now();
+        try {
+          const response = await axios.post(NIM_API_BASE + '/chat/completions', body, {
+            headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
+            timeout: 35000, validateStatus: status => status >= 200 && status < 300
+          });
+          const payload = response.data || {};
+          const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+          const message = choice?.message || {};
+          const content = typeof message.content === 'string' ? message.content : '';
+          const reasoning = [message.reasoning, message.reasoning_content, message.thinking].filter(x => typeof x === 'string').join('');
+          return { model, httpStatus: response.status, latencyMs: Date.now()-t0, finishReason: choice?.finish_reason || null, contentChars: content.length, preview: content.slice(0,100), hasReasoning: reasoning.length>0 || /<think|<mm:think/i.test(content), reasoningChars: reasoning.length, usage: payload.usage || null };
+        } catch (error) {
+          return { model, httpStatus: error.response?.status || null, latencyMs: Date.now()-t0, error: cleanProviderError(error) };
+        }
+      }));
+      console.log('[NIM_MODEL_PROBE]', JSON.stringify({ startedAt, finishedAt:new Date().toISOString(), catalogueCount:catalogue.models.length, candidates, tests }));
+    })().catch(error => console.error('[NIM_MODEL_PROBE_ERROR]', cleanProviderError(error)));
+  });
+}
+
 app.all('*', (req, res) => {
   res.status(404).json({ error: { message: 'Endpoint ' + req.path + ' not found', type: 'invalid_request_error', code: 404 } });
 });
