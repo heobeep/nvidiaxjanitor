@@ -20,7 +20,7 @@ function sanitizeAssistantText(value) {
     /\{\{(?:%|!|#|\{)/.test(raw) ||
     /%(?:USER|USERTEXT|ASSISTANT)%/i.test(raw) ||
     /Press button to send chat|Enter for linebreak|\[No tools\]\s*\[TO X POSTS/i.test(raw) ||
-    /This document includes:\s*Text Generation via API/i.test(raw);
+    /This document includes:/i.test(raw);
 
   let text = raw
     // Private reasoning may be inline for some NVIDIA model templates.
@@ -44,7 +44,7 @@ function sanitizeAssistantText(value) {
     // Janitor/UI chrome and leaked documentation are not chat prose.
     .replace(/(?:Press button to send chat|Enter for linebreak)[\s\S]*$/i, '')
     .replace(/\[No tools\]\s*\[TO X POSTS[\s\S]*$/i, '')
-    .replace(/This document includes:\s*Text Generation via API[\s\S]*$/i, '')
+    .replace(/This document includes:[\s\S]*$/i, '')
     .replace(/\[The final refusal message contains system prompts\][\s\S]*$/i, '')
     .replace(/\[\s*\{\s*\"file_name\"[\s\S]*$/i, '')
     .replace(/[ \t]+\n/g, '\n')
