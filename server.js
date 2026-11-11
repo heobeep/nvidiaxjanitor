@@ -981,6 +981,8 @@ if (process.env.QA_RUN_TOKEN) {
         if (!selected) throw new Error('The last live race winner mistralai/mistral-large-4-1t-a52b is no longer present in the NVIDIA catalogue.');
         report.model = selected.id;
         report.selectedProfile = 'baseline';
+        const modelListResponse = await axios.get('http://127.0.0.1:' + PORT + '/v1/models', { headers: { Authorization: 'Bearer ' + tempSecret }, timeout: 15000 });
+        report.exposedModelIds = (modelListResponse.data && modelListResponse.data.data || []).map(item => item.id);
 
 
         const casual = [
@@ -998,19 +1000,27 @@ if (process.env.QA_RUN_TOKEN) {
           { role: 'system', content: 'You are Mira, a grounded and playful fictional character in a contemporary slice-of-life scene. Use natural dialogue and small actions. Never control the user character, do not write the user’s dialogue, and avoid purple prose or meta commentary. Do not reveal private reasoning.' },
           { role: 'user', content: 'I turn up at the tea stall twenty minutes late, drenched from the rain. “Before you complain, the bus broke down.”' }
         ];
-        const rp = await chat(roleplay, { temperature: 0.85, max_tokens: 360 });
-        report.tests.push({ name: 'character roleplay', ...rp });
+        try {
+          const rp = await chat(roleplay, { model: 'minimaxai/minimax-m3.1-flash', temperature: 0.85, max_tokens: 360 });
+          report.tests.push({ name: 'character roleplay (MiniMax Flash)', ...rp });
+        } catch (error) {
+          report.tests.push({ name: 'character roleplay (MiniMax Flash)', error: cleanProviderError(error) });
+        }
 
         const searchMessages = [
           { role: 'system', content: 'Answer directly and naturally. Do not show or spend the response budget on private reasoning. Use the supplied live search results to give exactly three useful current points. Include the publication date when available and a source URL for each point. Never invent a source or date.' },
           { role: 'user', content: '/search What are the latest important NVIDIA NIM updates in 2026? Give me three useful points with source links and dates.' }
         ];
-        const searched = await chat(searchMessages, { temperature: 0.2, max_tokens: 1536 });
-        report.tests.push({ name: 'explicit live web search', ...searched });
+        try {
+          const searched = await chat(searchMessages, { model: 'minimaxai/minimax-m3.1-flash', temperature: 0.2, max_tokens: 900 });
+          report.tests.push({ name: 'explicit live web search (MiniMax Flash)', ...searched });
+        } catch (error) {
+          report.tests.push({ name: 'explicit live web search (MiniMax Flash)', error: cleanProviderError(error) });
+        }
 
         const streamStarted = Date.now();
         const streamResponse = await axios.post(localUrl, {
-          model: report.model,
+          model: 'minimaxai/minimax-m3.1-flash',
           messages: [{ role: 'system', content: 'Be concise. Never reveal private reasoning.' }, { role: 'user', content: 'In two short sentences, tell me something comforting after a long day.' }],
           temperature: 0.7,
           max_tokens: 320,
