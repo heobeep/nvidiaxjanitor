@@ -38,8 +38,8 @@ const DEFAULT_SETTINGS = {
   presence_penalty: 0,
   frequency_penalty: 0,
   default_model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
-  show_reasoning: false,
-  thinking_mode: false
+  show_reasoning: true,
+  thinking_mode: true
 };
 
 let state;
@@ -100,7 +100,7 @@ async function persistState() {
   return saveQueue;
 }
 function emptyState() {
-  return { version: 1, reasoningSettingsVersion: 2, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
+  return { version: 1, reasoningSettingsVersion: 3, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
 }
 async function initializeState() {
   if (ENCRYPTION_KEY.length !== 32) throw new Error('DATA_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).');
@@ -139,17 +139,16 @@ async function initializeState() {
     state.settings.default_model = state.settings.default_model || DEFAULT_SETTINGS.default_model;
     // Version 2 moves roleplay off Nano Omni, limits hidden reasoning by
     // default, and exposes only models that generated usable RP on this key.
-    if (Number(state.reasoningSettingsVersion || 0) < 2) {
+    if (Number(state.reasoningSettingsVersion || 0) < 3) {
       if (!state.settings.default_model ||
           state.settings.default_model === 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning' ||
-          state.settings.default_model === 'mistralai/mistral-large-4-1t-a52b' ||
-          state.settings.default_model === 'minimaxai/minimax-m3.1-flash') {
+          state.settings.default_model === 'mistralai/mistral-large-4-1t-a52b') {
         state.settings.default_model = DEFAULT_SETTINGS.default_model;
       }
-      state.settings.show_reasoning = false;
-      state.settings.thinking_mode = false;
+      state.settings.show_reasoning = true;
+      state.settings.thinking_mode = true;
       state.verifiedModelIds = VERIFIED_MODEL_IDS.slice();
-      state.reasoningSettingsVersion = 2;
+      state.reasoningSettingsVersion = 3;
     }
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
