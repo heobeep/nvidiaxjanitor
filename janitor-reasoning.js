@@ -45,15 +45,15 @@ function extractReasoning(message) {
     if (text) return text;
   }
   const content = asText(source.content);
-  const match = content.match(/<(?:mm:think|thinking|think)>([\s\\S]*?)<\/(?:mm:think|thinking|think)>/i);
+  const match = content.match(/<(?:mm:think|thinking|think)>([\s\S]*?)<\/(?:mm:think|thinking|think)>/i);
   return match ? match[1].trim() : '';
 }
 
 function removeInlineThinking(content) {
   return asText(content)
-    .replace(/<mm:think>[\s\\S]*?<\/mm:think>/gi, '')
-    .replace(/<thinking>[\s\\S]*?<\/thinking>/gi, '')
-    .replace(/<think>[\s\\S]*?<\/think>/gi, '')
+    .replace(/<mm:think>[\s\S]*?<\/mm:think>/gi, '')
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .trim();
 }
 
