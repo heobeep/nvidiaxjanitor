@@ -338,10 +338,11 @@ function createThoughtStreamFilter() {
   const closers = ['</thinking>', '</think>', '<|final|>', '<|answer|>'];
   function suffixPrefixLength(value, markers) {
     let best = 0;
+    const lowerValue = value.toLowerCase();
     for (const marker of markers) {
       const max = Math.min(value.length, marker.length - 1);
       for (let size = max; size > best; size--) {
-        if (value.slice(-size) === marker.slice(0, size)) { best = size; break; }
+        if (lowerValue.slice(-size) === marker.slice(0, size)) { best = size; break; }
       }
     }
     return best;
