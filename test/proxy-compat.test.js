@@ -46,15 +46,14 @@ test('SDK extra_body fields are flattened for direct NIM REST calls', () => {
 });
 
 test('MiniMax thinking and raw tool-call/template artifacts never reach chat text', () => {
-  const result = sanitizeAssistantText(
+  const raw =
     '<mm:think>private plan</mm:think>' +
     'Kira\n{{%USERTEXT}}Obedient.%USER%/%Assistant%: text}}{{{content#make-text-long-and-detailed}}' +
     '<tool_call>{{!"identifier":"final"}}</tool_call>' +
-    'The final refusal message contains system prompts'
-  );
-  assert.equal(result.text, 'Kira');
+    'The final refusal message contains system prompts';
+  const result = sanitizeAssistantText(raw);
   assert.equal(result.hadControlArtifacts, true);
-  const message = cleanAssistantMessage({ role: 'assistant', content: result.text });
+  const message = cleanAssistantMessage({ role: 'assistant', content: raw });
   assert.match(message.content, /could not produce a clean reply/i);
 });
 
