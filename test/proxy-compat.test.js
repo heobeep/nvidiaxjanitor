@@ -6,13 +6,19 @@ const { resolveModel, buildNimRequest } = require('../model-compat');
 const { sanitizeAssistantText, cleanAssistantMessage } = require('../response-sanitizer');
 const { toJanitorMessage, createStreamReasoningState, mapReasoningDelta, closeStreamReasoning } = require('../janitor-reasoning');
 
-test('legacy MiniMax M3.1 Janitor selection is redirected to Mistral Large 4.1', () => {
+test('legacy MiniMax M3.1 Janitor selection is redirected to the fast reasoning model', () => {
   const result = resolveModel('minimaxai/minimax-m3.1-flash', 'mistralai/mistral-large-4-1t-a52b');
   assert.equal(result.redirected, true);
   assert.equal(result.model, 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
 });
 
-test('Mistral Large uses supported low reasoning and enough output budget', () => {
+test('stale Mistral Janitor selection is redirected to the fast reasoning model', () => {
+  const result = resolveModel('mistralai/mistral-large-4-1t-a52b', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
+  assert.equal(result.redirected, true);
+  assert.equal(result.model, 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
+});
+
+test('Mistral Large uses supported low reasoning and respects the client output budget', () => {
   const body = buildNimRequest(
     { messages: [{ role: 'user', content: 'Continue the scene.' }], max_tokens: 512 },
     'mistralai/mistral-large-4-1t-a52b',
