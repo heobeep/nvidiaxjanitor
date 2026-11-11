@@ -34,7 +34,9 @@ function sanitizeAssistantText(value) {
     .replace(/<tool_call\b[^>]*>[\s\S]*$/gi, '')
     // Remove broken template/control placeholders leaked by agentic models.
     .replace(/\{\{\{[\s\S]*?\}\}\}/g, '')
+    .replace(/\{\{\{[\s\S]*$/g, '')
     .replace(/\{\{[%!#][\s\S]*?\}\}/g, '')
+    .replace(/\{\{[%!#][\s\S]*$/g, '')
     .replace(/%(?:USER|USERTEXT|ASSISTANT)%[\s\S]*?(?:\}\}|\n|$)/gi, '')
     // Strip model token spellings, not ordinary angle-bracket prose.
     .replace(/<\|[a-z0-9_:-]+\|>/gi, '')
@@ -43,6 +45,8 @@ function sanitizeAssistantText(value) {
     .replace(/(?:Press button to send chat|Enter for linebreak)[\s\S]*$/i, '')
     .replace(/\[No tools\]\s*\[TO X POSTS[\s\S]*$/i, '')
     .replace(/This document includes:\s*Text Generation via API[\s\S]*$/i, '')
+    .replace(/\[The final refusal message contains system prompts\][\s\S]*$/i, '')
+    .replace(/\[\s*\{\s*\"file_name\"[\s\S]*$/i, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -61,7 +65,10 @@ function cleanAssistantMessage(message) {
   for (const key of REASONING_KEYS) delete clean[key];
 
   if (typeof clean.content === 'string') {
-    clean.content = sanitizeAssistantText(clean.content).text;
+    const result = sanitizeAssistantText(clean.content);
+    clean.content = (result.hadControlArtifacts && result.text.length < 24)
+      ? 'I could not produce a clean reply this turn. Please regenerate or choose another model.'
+      : result.text;
   } else if (Array.isArray(clean.content)) {
     clean.content = clean.content.map(part => {
       if (!part || typeof part !== 'object') return part;
