@@ -12,10 +12,13 @@ test('stale Mistral Large selection redirects to the live-tested Lightning model
   assert.equal(result.model, LIGHTNING);
 });
 
-test('cached MiniMax selection stays on MiniMax instead of silently changing engines', () => {
-  const result = resolveModel(MINIMAX_M31_FLASH, LIGHTNING);
-  assert.equal(result.redirected, false);
-  assert.equal(result.model, MINIMAX_M31_FLASH);
+test('legacy MiniMax and Nano selections redirect to the tested roleplay model', () => {
+  const mini = resolveModel(MINIMAX_M31_FLASH, LIGHTNING);
+  const nano = resolveModel('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', LIGHTNING);
+  assert.equal(mini.redirected, true);
+  assert.equal(mini.model, LIGHTNING);
+  assert.equal(nano.redirected, true);
+  assert.equal(nano.model, LIGHTNING);
 });
 
 test('Lightning uses the documented zero reasoning budget when thinking is off', () => {
@@ -59,9 +62,9 @@ test('MiniMax M3.1 thinking is disabled by default', () => {
   assert.equal(body.reasoning_effort, undefined);
 });
 
-test('MiniMax M3.1 thinking can be enabled explicitly', () => {
+test('MiniMax M3.1 agentic thinking remains disabled even when global thinking is on', () => {
   const body = buildNimRequest({ messages: [] }, MINIMAX_M31_FLASH, { thinking_mode: true });
-  assert.deepEqual(body.chat_template_kwargs, { thinking_mode: 'enabled' });
+  assert.deepEqual(body.chat_template_kwargs, { thinking_mode: 'disabled' });
 });
 
 test('SDK extra_body fields are flattened for direct NIM REST calls', () => {
