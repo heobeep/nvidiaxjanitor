@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { LIGHTNING, BOLT, MINIMAX_M31_FLASH, resolveModel, buildNimRequest } = require('../model-compat');
 const { sanitizeAssistantText, cleanAssistantMessage } = require('../response-sanitizer');
-const { toJanitorMessage, createStreamReasoningState, mapReasoningDelta, closeStreamReasoning, MAX_REASONING_CHARS } = require('../janitor-reasoning');
+const { toJanitorMessage, createStreamReasoningState, mapReasoningDelta, closeStreamReasoning, THINKING_STATUS } = require('../janitor-reasoning');
 
 test('stale Mistral Large selection redirects to the live-tested Lightning model', () => {
   const result = resolveModel('mistralai/mistral-large-4-1t-a52b', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
@@ -18,7 +18,7 @@ test('cached MiniMax selection stays on MiniMax instead of silently changing eng
   assert.equal(result.model, MINIMAX_M31_FLASH);
 });
 
-test('Lightning uses the documented zero reasoning budget by default', () => {
+test('Lightning uses the documented zero reasoning budget when thinking is off', () => {
   const body = buildNimRequest(
     { messages: [{ role: 'user', content: 'Continue the scene.' }], max_tokens: 512 },
     LIGHTNING,
@@ -88,26 +88,29 @@ test('Janitor UI chrome and leaked documentation are removed', () => {
   assert.equal(result.text, 'A character reply.');
 });
 
-test('structured reasoning becomes visible only when enabled and fits the safe limit', () => {
+test('structured reasoning is represented by a short status, never raw model thoughts', () => {
+  const secretLikeReasoning = 'Here is a thinking process: 1. AnalyzeUserInput 2. DetermineCharacter 3. FormulateResponse';
   const result = toJanitorMessage(
-    { role: 'assistant', content: 'Hello there.', reasoning_content: 'I should answer warmly and continue the scene naturally.' },
+    { role: 'assistant', content: 'Hello there.', reasoning_content: secretLikeReasoning },
     { showReasoning: true, cleanAssistantMessage, sanitizeAssistantText }
   );
-  assert.match(result.content, /^<thinking>\nI should answer warmly/);
+  assert.match(result.content, new RegExp(THINKING_STATUS));
   assert.match(result.content, /Hello there\./);
+  assert.equal(result.content.includes(secretLikeReasoning), false);
   assert.equal(result.reasoning_content, undefined);
 });
 
-test('collapsed prompt dumps are not exposed as reasoning', () => {
+test('collapsed prompt dumps are not exposed even when provider has reasoning metadata', () => {
   const gibberish = 'NeedcontinuationfaithfulKKiperapersona:ContextRecap-'.repeat(60);
   const result = toJanitorMessage(
     { role: 'assistant', content: 'A clean reply.', reasoning_content: gibberish },
     { showReasoning: true, cleanAssistantMessage, sanitizeAssistantText }
   );
-  assert.equal(result.content, 'A clean reply.');
+  assert.equal(result.content.includes(gibberish), false);
+  assert.match(result.content, /Reasoning received/);
 });
 
-test('generic analysis fields are never treated as visible reasoning', () => {
+test('generic analysis fields are never treated as visible thinking', () => {
   const result = toJanitorMessage(
     { role: 'assistant', content: 'A normal reply.', analysis: 'This is not a supported reasoning field.' },
     { showReasoning: true, cleanAssistantMessage, sanitizeAssistantText }
@@ -115,16 +118,15 @@ test('generic analysis fields are never treated as visible reasoning', () => {
   assert.equal(result.content, 'A normal reply.');
 });
 
-test('streaming reasoning has a hard maximum and closes before the answer', () => {
+test('streaming reasoning produces one status line and never streams raw thoughts', () => {
   const state = createStreamReasoningState();
   const first = mapReasoningDelta(
     { reasoning_content: 'I should continue the scene naturally.' },
     state,
     { showReasoning: true, sanitizeAssistantText, filterContent: value => value }
   );
-  const huge = 'ordinary '.repeat(200);
   const second = mapReasoningDelta(
-    { reasoning_content: huge },
+    { reasoning_content: 'AnalyzeUserInput: do not expose this long thought.' },
     state,
     { showReasoning: true, sanitizeAssistantText, filterContent: value => value }
   );
@@ -133,10 +135,10 @@ test('streaming reasoning has a hard maximum and closes before the answer', () =
     state,
     { showReasoning: true, sanitizeAssistantText, filterContent: value => value }
   );
-  assert.match(first.content, /^<thinking>/);
+  assert.match(first.content, /Reasoning received/);
   assert.equal(second.content, undefined);
-  assert.match(third.content, /<\/thinking>/);
-  assert.ok(state.reasoningChars <= MAX_REASONING_CHARS);
+  assert.match(third.content, /She smiles/);
+  assert.equal(third.content.includes('AnalyzeUserInput'), false);
   assert.equal(closeStreamReasoning(state), '');
 });
 
