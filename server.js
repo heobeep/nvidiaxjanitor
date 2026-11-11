@@ -143,6 +143,12 @@ async function initializeState() {
     // Migrate once from the previous build, which forcibly disabled both
     // switches regardless of the admin UI. Preserve future user choices.
     if (state.reasoningSettingsVersion !== 1) {
+      // Replace the previous slow default during the same one-time migration.
+      if (!state.settings.default_model ||
+          state.settings.default_model === 'mistralai/mistral-large-4-1t-a52b' ||
+          state.settings.default_model === 'minimaxai/minimax-m3.1-flash') {
+        state.settings.default_model = DEFAULT_SETTINGS.default_model;
+      }
       state.settings.show_reasoning = process.env.SHOW_REASONING !== 'false';
       state.settings.thinking_mode = process.env.ENABLE_THINKING_MODE !== 'false';
       state.reasoningSettingsVersion = 1;
