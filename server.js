@@ -944,32 +944,33 @@ if (process.env.QA_RUN_TOKEN) {
         if (!state.providerKeys.some(key => key.enabled !== false)) throw new Error('No enabled NVIDIA provider keys are configured.');
         const catalogue = await refreshModels(true);
         const available = catalogue.models || [];
-        const preferred = state.settings.default_model && available.find(model => model.id === state.settings.default_model);
-        const chatCandidates = available.filter(model => !/(embed|rerank|guard|nemo|bge)/i.test(model.id || ''));
-        const ranked = chatCandidates.slice().sort((a, b) => {
-          const score = id => (/mistral.*large/i.test(id) ? 0 : (/gpt-oss.*120b|llama.*70b|deepseek/i.test(id) ? 1 : (/qwen|gemma/i.test(id) ? 2 : 3)));
-          return score(a.id) - score(b.id);
-        });
-        const probes = [];
-        const tryList = [];
-        if (preferred) tryList.push(preferred);
-        for (const candidate of ranked) if (!tryList.some(item => item.id === candidate.id)) tryList.push(candidate);
-        let selected = null;
-        for (const candidate of tryList.slice(0, 12)) {
-          report.model = candidate.id;
-          try {
-            const probe = await chat([{ role: 'system', content: 'Reply with visible text only.' }, { role: 'user', content: 'Reply with exactly READY.' }], { temperature: 0, max_tokens: 24 });
-            probes.push({ model: candidate.id, status: 'working', latencyMs: probe.latencyMs, preview: probe.content.slice(0, 80) });
-            if (probe.content.trim()) { selected = candidate; break; }
-            probes.push({ model: candidate.id, status: 'empty response' });
-          } catch (probeError) {
-            probes.push({ model: candidate.id, status: 'failed', error: cleanProviderError(probeError) });
-          }
-        }
-        if (!selected) throw new Error('No chat-capable model in the first 12 candidates returned visible text. Probes: ' + JSON.stringify(probes));
-        report.model = selected.id;
         report.catalogueCount = available.length;
-        report.candidateProbes = probes;
+        const expiry = Date.now() + 8 * 60 * 60 * 1000;
+        const adminCookie = 'nj_admin=' + encodeURIComponent(sessionCookie(expiry));
+        const raceResponse = await axios.post('http://127.0.0.1:' + PORT + '/admin/api/models/race', {}, {
+          headers: { Cookie: adminCookie, 'Content-Type': 'application/json' },
+          timeout: 900000
+        });
+        const race = raceResponse.data || {};
+        report.modelRaceSummary = race.summary || null;
+        const workingModels = (race.results || []).filter(item => item.status === 'alive' || item.status === 'adaptive');
+        report.modelRaceWorkingModels = workingModels.slice(0, 12).map(item => ({
+          model: item.model,
+          status: item.status,
+          workingProfile: item.workingProfile,
+          latencyMs: item.latencyMs,
+          testedVia: item.testedVia,
+          preview: item.preview
+        }));
+        const preferredWorking = workingModels.find(item => item.model === state.settings.default_model);
+        const selectedResult = preferredWorking ||
+          workingModels.find(item => /mistral.*large/i.test(item.model)) ||
+          workingModels.find(item => /gpt-oss.*120b|llama.*70b|deepseek/i.test(item.model)) ||
+          workingModels[0];
+        if (!selectedResult) throw new Error('The live model race found no model that returned visible text. Check NVIDIA key access and per-model availability.');
+        report.model = selectedResult.model;
+        report.selectedProfile = selectedResult.workingProfile;
+
 
         const casual = [
           { role: 'system', content: 'Be a natural, emotionally aware conversation partner. Sound like a real person texting, not a help article. Keep replies concise, do not over-explain, and never reveal private reasoning.' },
