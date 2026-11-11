@@ -7,6 +7,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
+const { ROLEPLAY_REDIRECTS, resolveModel, buildNimRequest } = require('./model-compat');
+const { sanitizeAssistantText, cleanAssistantMessage: sanitizeAssistantMessage } = require('./response-sanitizer');
 
 const app = express();
 let modelRaceProgress = null;
@@ -172,7 +174,9 @@ function cleanProviderError(error) {
 }
 function isRetryable(error) {
   const status = error && error.response && error.response.status;
-  return !status || [401, 403, 404, 408, 425, 429, 500, 502, 503, 504].includes(status);
+  // A 404 is a bad model/deployment identifier, not a transient failure.
+  // Retrying the same request against every key only adds latency and noise.
+  return !status || [408, 409, 425, 429, 500, 502, 503, 504].includes(status);
 }
 function providerOrder() {
   const enabled = state.providerKeys.filter(k => k.enabled !== false);
@@ -308,27 +312,11 @@ function publicState(req) {
 }
 function stripThinkTags(text, trim) {
   if (text == null) return text;
-  const result = String(text)
-    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
-    .replace(/<\/?think(?:ing)?>/gi, '')
-    .replace(/<\|(?:analysis|reasoning|thought|scratchpad)\|>[\s\S]*?(?=<\|(?:final|answer)\|>|$)/gi, '')
-    .replace(/<\|(?:final|answer)\|>/gi, '');
-  return trim === false ? result : result.trim();
+  const result = sanitizeAssistantText(String(text)).text;
+  return trim === false ? result : String(result || '').trim();
 }
 function cleanAssistantMessage(message) {
-  const clean = Object.assign({}, message || {});
-  delete clean.reasoning;
-  delete clean.reasoning_content;
-  delete clean.thinking;
-  delete clean.analysis;
-  if (typeof clean.content === 'string') clean.content = stripThinkTags(clean.content);
-  else if (Array.isArray(clean.content)) clean.content = clean.content.map(part => {
-    if (!part || typeof part !== 'object') return part;
-    const next = Object.assign({}, part);
-    if (typeof next.text === 'string') next.text = stripThinkTags(next.text);
-    return next;
-  });
-  return clean;
+  return sanitizeAssistantMessage(message);
 }
 function cleanCompletionChunk(data) {
   if (!data || !Array.isArray(data.choices)) return data;
@@ -345,8 +333,8 @@ function cleanCompletionChunk(data) {
 function createThoughtStreamFilter() {
   let mode = 'normal';
   let pending = '';
-  const openers = ['<thinking>', '<think>', '<|analysis|>', '<|reasoning|>', '<|thought|>', '<|scratchpad|>'];
-  const closers = ['</thinking>', '</think>', '<|final|>', '<|answer|>'];
+  const openers = ['<mm:think>', '<thinking>', '<think>', '<tool_call>', '<|analysis|>', '<|reasoning|>', '<|thought|>', '<|scratchpad|>', '{{%', '{{!', '{{#', '{{{', '%USER%', '%USERTEXT%', '%ASSISTANT%'];
+  const closers = ['</mm:think>', '</thinking>', '</think>', '</tool_call>', '<|final|>', '<|answer|>', '}}}', '}}'];
   function suffixPrefixLength(value, markers) {
     let best = 0;
     const lowerValue = value.toLowerCase();
@@ -679,7 +667,8 @@ app.get('/v1/models', async (req, res) => {
   try {
     const result = await refreshModels(false);
     const verifiedIds = new Set((state.verifiedModelIds && state.verifiedModelIds.length) ? state.verifiedModelIds : VERIFIED_MODEL_IDS);
-    const verifiedModels = result.models.filter(m => verifiedIds.has(m.id));
+    const redirectedIds = new Set(Object.keys(ROLEPLAY_REDIRECTS));
+    const verifiedModels = result.models.filter(m => verifiedIds.has(m.id) && !redirectedIds.has(m.id));
     res.json({
       object: 'list',
       data: verifiedModels.map(m => ({
@@ -700,7 +689,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   metrics.requests++;
   metrics.lastRequestAt = new Date().toISOString();
   const body = req.body || {};
-  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : state.settings.default_model;
+  const resolvedModel = resolveModel(body.model, state.settings.default_model);
+  const requestedModel = resolvedModel.requestedModel;
+  const model = resolvedModel.model;
   if (!model) {
     metrics.failures++;
     return res.status(400).json({ error: { message: 'A model ID is required. Choose a model exposed by GET /v1/models.', type: 'invalid_request_error', code: 400 } });
@@ -745,20 +736,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
   const stream = Boolean(body.stream);
-  const extraBody = Object.assign({}, body.extra_body || {});
-  if (state.settings.thinking_mode && model.startsWith('openai/gpt-oss')) {
-    extraBody.chat_template_kwargs = Object.assign({}, extraBody.chat_template_kwargs || {}, { thinking: true });
+  const nimRequest = buildNimRequest(Object.assign({}, body, { stream }), model, state.settings);
+  nimRequest.presence_penalty = body.presence_penalty ?? state.settings.presence_penalty;
+  nimRequest.frequency_penalty = body.frequency_penalty ?? state.settings.frequency_penalty;
+  if (resolvedModel.redirected) {
+    console.warn('[MODEL_COMPAT] Redirected unsupported Janitor roleplay model', requestedModel, 'to', model);
+    res.setHeader('X-Proxy-Model-Redirected', 'true');
+    res.setHeader('X-Proxy-Actual-Model', model);
   }
-  const nimRequest = Object.assign({}, body, {
-    model,
-    temperature: body.temperature ?? state.settings.temperature,
-    max_tokens: body.max_tokens ?? state.settings.max_tokens,
-    top_p: body.top_p ?? state.settings.top_p,
-    presence_penalty: body.presence_penalty ?? state.settings.presence_penalty,
-    frequency_penalty: body.frequency_penalty ?? state.settings.frequency_penalty,
-    extra_body: Object.keys(extraBody).length ? extraBody : undefined,
-    stream
-  });
   try {
     const routed = await requestWithFailover('POST', '/chat/completions', nimRequest, stream ? 'stream' : 'json', searchPlan.shouldSearch ? 90000 : 60000);
     const response = routed.response;
@@ -815,7 +800,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         id: payload.id || ('chatcmpl-' + Date.now()),
         object: payload.object || 'chat.completion',
         created: payload.created || Math.floor(Date.now() / 1000),
-        model,
+        model: payload.model || model,
         choices: (payload.choices || []).map((choice, index) => ({
           index: choice.index ?? index,
           message: cleanAssistantMessage(Object.assign({ role: 'assistant' }, choice.message || {})),
