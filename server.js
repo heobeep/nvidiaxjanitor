@@ -976,10 +976,10 @@ if (process.env.ROLEPLAY_QA_TOKEN) {
         'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
       ];
       const promptMessages = [
-        { role: 'system', content: 'You are writing collaborative fictional roleplay as Mara, a 29-year-old late-night cafe owner. She is dry-witted, observant, quietly kind but guarded. Write natural, specific prose with believable dialogue; avoid purple prose and generic filler. Stay in character. Do not decide or narrate the user character’s thoughts, words, or actions. Output only the next in-scene turn, normally 1–3 paragraphs. Never output analysis, planning, metadata, debug text, tool calls, template placeholders, or instructions.' },
-        { role: 'user', content: 'Rain rattles against the cafe windows. I push the door open, shake water from my jacket, and look around the nearly empty room. “You’re still open?”' },
-        { role: 'assistant', content: 'Mara glances up from the register. “Technically, no. Practically, I’m avoiding going home to a sink full of dishes.” She nudges a folded towel across the counter. “You look like the rain won that argument, though.”' },
-        { role: 'user', content: 'I take the towel and give her a tired smile. “You always this welcoming to people who show up ten minutes before closing?”' }
+        { role: 'system', content: 'You are writing collaborative fictional roleplay as Mara, a 29-year-old late-night cafe owner. She is dry-witted, observant, quietly kind but guarded. Write natural, specific prose with believable dialogue; avoid purple prose and generic filler. Stay in character. Do not decide or narrate the user characters thoughts, words, or actions. Output only the next in-scene turn, normally 1-3 paragraphs. Never output analysis, planning, metadata, debug text, tool calls, template placeholders, or instructions.' },
+        { role: 'user', content: 'Rain rattles against the cafe windows. I push the door open, shake water from my jacket, and look around the nearly empty room. "You are still open?"' },
+        { role: 'assistant', content: 'Mara glances up from the register. "Technically, no. Practically, I am avoiding going home to a sink full of dishes." She nudges a folded towel across the counter. "You look like the rain won that argument, though."' },
+        { role: 'user', content: 'I take the towel and give her a tired smile. "You always this welcoming to people who show up ten minutes before closing?"' }
       ];
       const enabled = state.providerKeys.filter(k => k.enabled !== false);
       const report = { at: new Date().toISOString(), candidateCount: candidates.length, catalogueCount: 0, available: [], results: [] };
@@ -1015,30 +1015,26 @@ if (process.env.ROLEPLAY_QA_TOKEN) {
             max_tokens: 500,
             stream: false
           };
-          if (model === 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning') {
-            request.chat_template_kwargs = { enable_thinking: false };
-          }
-          if (model === 'deepseek-ai/deepseek-v4-flash-0731') {
-            request.chat_template_kwargs = { thinking: false };
-          }
+          if (model === 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning') request.chat_template_kwargs = { enable_thinking: false };
+          if (model === 'deepseek-ai/deepseek-v4-flash-0731') request.chat_template_kwargs = { thinking: false };
           const r = await axios.post(NIM_API_BASE + '/chat/completions', request, {
             headers: { Authorization: 'Bearer ' + provider.secret, 'Content-Type': 'application/json' },
             timeout: 25000, validateStatus: s => s >= 200 && s < 300
           });
           const choice = r.data && r.data.choices && r.data.choices[0];
           const message = choice && choice.message || {};
-          let content = typeof message.content === 'string' ? message.content : '';
-          content = content.replace(/<mm:think>[\\s\\S]*?<\\/mm:think>/gi, '').replace(/<think(?:ing)?>[\\s\\S]*?<\\/think(?:ing)?>/gi, '').trim();
-          const lower = content.toLowerCase();
-          const artifacts = /<tool_call|<\\|(?:analysis|assistant|im_start)|\\{\\{[%#!{]|%USER%|begin chain of thought|as an ai language model/.test(content);
-          const words = content.split(/\\s+/).filter(Boolean);
+          const rawContent = typeof message.content === 'string' ? message.content : '';
+          const cleaned = sanitizeAssistantText(rawContent);
+          const content = cleaned.text || '';
+          const words = content.trim() ? content.trim().split(/\s+/).filter(Boolean) : [];
           const uniqueRatio = words.length ? new Set(words.map(w => w.toLowerCase())).size / words.length : 0;
           report.results.push({
             model, status: 'ok', latencyMs: Date.now() - started,
             finishReason: choice && choice.finish_reason || null,
             contentChars: content.length,
             reasoningChars: String(message.reasoning_content || message.reasoning || '').length,
-            artifacts, uniqueWordRatio: Number(uniqueRatio.toFixed(2)),
+            artifacts: cleaned.hadControlArtifacts,
+            uniqueWordRatio: Number(uniqueRatio.toFixed(2)),
             preview: content.slice(0, 850)
           });
         } catch (e) {
