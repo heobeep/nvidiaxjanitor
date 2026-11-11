@@ -330,6 +330,85 @@ function cleanCompletionChunk(data) {
   return data;
 }
 
+
+function createThoughtStreamFilter() {
+  let mode = 'normal';
+  let pending = '';
+  const openers = ['<thinking>', '<think>', '<|analysis|>', '<|reasoning|>', '<|thought|>', '<|scratchpad|>'];
+  const closers = ['</thinking>', '</think>', '<|final|>', '<|answer|>'];
+  function suffixPrefixLength(value, markers) {
+    let best = 0;
+    for (const marker of markers) {
+      const max = Math.min(value.length, marker.length - 1);
+      for (let size = max; size > best; size--) {
+        if (value.slice(-size) === marker.slice(0, size)) { best = size; break; }
+      }
+    }
+    return best;
+  }
+  return {
+    push(value) {
+      pending += String(value || '');
+      let output = '';
+      while (pending.length) {
+        const markers = mode === 'normal' ? openers.concat(closers) : closers;
+        let markerIndex = -1;
+        let matched = '';
+        for (const marker of markers) {
+          const found = pending.toLowerCase().indexOf(marker);
+          if (found !== -1 && (markerIndex === -1 || found < markerIndex || (found === markerIndex && marker.length > matched.length))) {
+            markerIndex = found;
+            matched = marker;
+          }
+        }
+        if (markerIndex !== -1) {
+          const isOpener = openers.includes(matched);
+          if (mode === 'normal') output += pending.slice(0, markerIndex);
+          pending = pending.slice(markerIndex + matched.length);
+          if (isOpener) mode = 'hidden';
+          else if (mode === 'hidden') mode = 'normal';
+          continue;
+        }
+        const keep = suffixPrefixLength(pending, markers);
+        if (mode === 'normal' && keep < pending.length) output += pending.slice(0, pending.length - keep);
+        pending = keep ? pending.slice(-keep) : '';
+        break;
+      }
+      return output;
+    }
+  };
+}
+function cleanStreamingCompletionChunk(data, filters) {
+  if (!data || !Array.isArray(data.choices)) return data;
+  const copy = Object.assign({}, data);
+  copy.choices = data.choices.map((choice, index) => {
+    const next = Object.assign({}, choice);
+    const choiceId = next.index ?? index;
+    if (next.delta && typeof next.delta === 'object') {
+      const delta = Object.assign({}, next.delta);
+      delete delta.reasoning;
+      delete delta.reasoning_content;
+      delete delta.thinking;
+      delete delta.analysis;
+      let filter = filters.get(choiceId);
+      if (!filter) { filter = createThoughtStreamFilter(); filters.set(choiceId, filter); }
+      if (typeof delta.content === 'string') delta.content = filter.push(delta.content);
+      else if (Array.isArray(delta.content)) {
+        delta.content = delta.content.map(part => {
+          if (!part || typeof part !== 'object') return part;
+          const cleanPart = Object.assign({}, part);
+          if (typeof cleanPart.text === 'string') cleanPart.text = filter.push(cleanPart.text);
+          return cleanPart;
+        });
+      }
+      next.delta = delta;
+    }
+    if (next.message) next.message = cleanAssistantMessage(next.message);
+    return next;
+  });
+  return copy;
+}
+
 function getLatestUserText(messages) {
   if (!Array.isArray(messages)) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -669,13 +748,14 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
       let buffer = '';
+      const streamFilters = new Map();
       function emitSseFrame(frame) {
         const dataLines = frame.split(/\r?\n/).filter(line => line.startsWith('data:'));
         if (!dataLines.length) return;
         const raw = dataLines.map(line => line.slice(5).replace(/^ /, '')).join('\n');
         if (raw.trim() === '[DONE]') { res.write('data: [DONE]\n\n'); return; }
         try {
-          const data = cleanCompletionChunk(JSON.parse(raw));
+          const data = cleanStreamingCompletionChunk(JSON.parse(raw), streamFilters);
           res.write('data: ' + JSON.stringify(data) + '\n\n');
         } catch (_) {
           console.warn('Dropped malformed upstream SSE frame');
