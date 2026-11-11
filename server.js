@@ -25,24 +25,21 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const ENCRYPTION_KEY = Buffer.from(process.env.DATA_ENCRYPTION_KEY || '', 'hex');
 
 const VERIFIED_MODEL_IDS = [
-  'minimaxai/minimax-m3.1-flash',
-  'mistralai/mistral-large-4-1t-a52b',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-  'nvidia/nemotron-3-ultra-550b-a55b',
   'nvidia/nemotron-3.5-lightning-30b-a3b',
-  'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  'stepfun-ai/step-5-preview'
+  'nvidia/nemotron-3.5-bolt-e4b',
+  'minimaxai/minimax-m3.1-flash',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
 ];
 
 const DEFAULT_SETTINGS = {
-  temperature: 0.8,
-  max_tokens: 4096,
-  top_p: 1,
+  temperature: 0.9,
+  max_tokens: 2048,
+  top_p: 0.95,
   presence_penalty: 0,
   frequency_penalty: 0,
-  default_model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-  show_reasoning: true,
-  thinking_mode: true
+  default_model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  show_reasoning: false,
+  thinking_mode: false
 };
 
 let state;
@@ -103,7 +100,7 @@ async function persistState() {
   return saveQueue;
 }
 function emptyState() {
-  return { version: 1, reasoningSettingsVersion: 1, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
+  return { version: 1, reasoningSettingsVersion: 2, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
 }
 async function initializeState() {
   if (ENCRYPTION_KEY.length !== 32) throw new Error('DATA_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).');
@@ -140,18 +137,19 @@ async function initializeState() {
     state.verifiedModelIds = Array.isArray(state.verifiedModelIds) && state.verifiedModelIds.length ? state.verifiedModelIds : VERIFIED_MODEL_IDS.slice();
     state.verifiedModelUpdatedAt = state.verifiedModelUpdatedAt || '2026-11-11T14:31:35.384Z';
     state.settings.default_model = state.settings.default_model || DEFAULT_SETTINGS.default_model;
-    // Migrate once from the previous build, which forcibly disabled both
-    // switches regardless of the admin UI. Preserve future user choices.
-    if (state.reasoningSettingsVersion !== 1) {
-      // Replace the previous slow default during the same one-time migration.
+    // Version 2 moves roleplay off Nano Omni, limits hidden reasoning by
+    // default, and exposes only models that generated usable RP on this key.
+    if (Number(state.reasoningSettingsVersion || 0) < 2) {
       if (!state.settings.default_model ||
+          state.settings.default_model === 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning' ||
           state.settings.default_model === 'mistralai/mistral-large-4-1t-a52b' ||
           state.settings.default_model === 'minimaxai/minimax-m3.1-flash') {
         state.settings.default_model = DEFAULT_SETTINGS.default_model;
       }
-      state.settings.show_reasoning = process.env.SHOW_REASONING !== 'false';
-      state.settings.thinking_mode = process.env.ENABLE_THINKING_MODE !== 'false';
-      state.reasoningSettingsVersion = 1;
+      state.settings.show_reasoning = false;
+      state.settings.thinking_mode = false;
+      state.verifiedModelIds = VERIFIED_MODEL_IDS.slice();
+      state.reasoningSettingsVersion = 2;
     }
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
@@ -250,6 +248,28 @@ async function requestWithFailover(method, endpoint, body, responseType, timeout
   }
   throw lastError || new Error('All configured NVIDIA keys failed.');
 }
+async function requestChatWithModelFallback(requestBody, firstModel, responseType, timeoutMs) {
+  const order = Array.from(new Set([firstModel, ...ROLEPLAY_FALLBACK_MODELS]));
+  let lastError = null;
+  for (let index = 0; index < order.length; index++) {
+    const model = order[index];
+    const payload = buildNimRequest(Object.assign({}, requestBody, { model }), model, state.settings);
+    payload.presence_penalty = requestBody.presence_penalty ?? state.settings.presence_penalty;
+    payload.frequency_penalty = requestBody.frequency_penalty ?? state.settings.frequency_penalty;
+    try {
+      const routed = await requestWithFailover('POST', '/chat/completions', payload, responseType, timeoutMs);
+      if (index > 0) console.warn('[MODEL_FALLBACK] requested=' + firstModel + ' actual=' + model);
+      return Object.assign({}, routed, { model, fallbackUsed: index > 0, requestedModel: firstModel });
+    } catch (error) {
+      lastError = error;
+      const status = error && (error.status || (error.response && error.response.status));
+      const eligible = !status || [404, 408, 422, 429, 500, 502, 503, 504].includes(status);
+      if (!eligible || index === order.length - 1) throw error;
+      console.warn('[MODEL_FALLBACK] ' + model + ' failed (' + cleanProviderError(error) + '); trying next roleplay model.');
+    }
+  }
+  throw lastError || new Error('All roleplay models and configured NVIDIA keys failed.');
+}
 async function fetchModelsForProvider(provider) {
   try {
     const response = await axios.get(NIM_API_BASE + '/models', {
@@ -330,8 +350,16 @@ function cleanAssistantMessage(message) {
   return sanitizeAssistantMessage(message);
 }
 function sanitizeReasoningText(value) {
-  const result = sanitizeAssistantText(String(value || ''));
-  return result.hadControlArtifacts && result.text.length < 24 ? { text: '' } : result;
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 800) return { text: '', hadControlArtifacts: false };
+  if (raw.split(/\s+/).some(token => token.length > 40)) return { text: '', hadControlArtifacts: false };
+  const words = raw.split(/\s+/).filter(Boolean);
+  if (words.length > 12 && words.reduce((sum, word) => sum + word.length, 0) / words.length > 16) {
+    return { text: '', hadControlArtifacts: false };
+  }
+  const result = sanitizeAssistantText(raw);
+  if (result.hadControlArtifacts || result.text.length > 800) return { text: '', hadControlArtifacts: result.hadControlArtifacts };
+  return result;
 }
 function cleanJanitorAssistantMessage(message) {
   return toJanitorMessage(message, {
@@ -766,19 +794,23 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
   const stream = Boolean(body.stream);
-  const nimRequest = buildNimRequest(Object.assign({}, body, { stream }), model, state.settings);
-  nimRequest.presence_penalty = body.presence_penalty ?? state.settings.presence_penalty;
-  nimRequest.frequency_penalty = body.frequency_penalty ?? state.settings.frequency_penalty;
   if (resolvedModel.redirected) {
     console.warn('[MODEL_COMPAT] Redirected unsupported Janitor roleplay model', requestedModel, 'to', model);
     res.setHeader('X-Proxy-Model-Redirected', 'true');
-    res.setHeader('X-Proxy-Actual-Model', model);
   }
   try {
     const requestStartedAt = Date.now();
-    const routed = await requestWithFailover('POST', '/chat/completions', nimRequest, stream ? 'stream' : 'json', searchPlan.shouldSearch ? 90000 : 60000);
+    const routed = await requestChatWithModelFallback(
+      Object.assign({}, body, { stream }),
+      model,
+      stream ? 'stream' : 'json',
+      searchPlan.shouldSearch ? 90000 : 60000
+    );
+    const actualModel = routed.model || model;
+    res.setHeader('X-Proxy-Actual-Model', actualModel);
+    if (routed.fallbackUsed) res.setHeader('X-Proxy-Model-Fallback', 'true');
     const response = routed.response;
-    console.info('[CHAT] model=' + model + ' stream=' + stream + ' latencyMs=' + (Date.now() - requestStartedAt) + ' thinking=' + Boolean(state.settings.thinking_mode) + ' reasoningDisplay=' + Boolean(state.settings.show_reasoning));
+    console.info('[CHAT] requested=' + requestedModel + ' actual=' + actualModel + ' fallback=' + Boolean(routed.fallbackUsed) + ' stream=' + stream + ' latencyMs=' + (Date.now() - requestStartedAt) + ' thinking=' + Boolean(state.settings.thinking_mode) + ' reasoningDisplay=' + Boolean(state.settings.show_reasoning));
     metrics.successes++;
     metrics.lastError = null;
     if (searchUsed) {
@@ -832,7 +864,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         id: payload.id || ('chatcmpl-' + Date.now()),
         object: payload.object || 'chat.completion',
         created: payload.created || Math.floor(Date.now() / 1000),
-        model: payload.model || model,
+        model: payload.model || actualModel,
         choices: (payload.choices || []).map((choice, index) => ({
           index: choice.index ?? index,
           message: cleanJanitorAssistantMessage(Object.assign({ role: 'assistant' }, choice.message || {})),
