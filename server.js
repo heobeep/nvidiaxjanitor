@@ -98,7 +98,7 @@ async function persistState() {
   return saveQueue;
 }
 function emptyState() {
-  return { version: 1, reasoningSettingsVersion: 3, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
+  return { version: 1, reasoningSettingsVersion: 4, adminPasswordHash: sha256(ADMIN_PASSWORD), settings: Object.assign({}, DEFAULT_SETTINGS), webSearch: { apiKey: '', enabled: false, auto: true }, verifiedModelIds: VERIFIED_MODEL_IDS.slice(), verifiedModelUpdatedAt: '2026-11-11T14:31:35.384Z', providerKeys: [], clientKeys: [], createdAt: new Date().toISOString() };
 }
 async function initializeState() {
   if (ENCRYPTION_KEY.length !== 32) throw new Error('DATA_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).');
@@ -147,6 +147,12 @@ async function initializeState() {
       state.settings.thinking_mode = true;
       state.verifiedModelIds = VERIFIED_MODEL_IDS.slice();
       state.reasoningSettingsVersion = 3;
+    }
+
+    // Version 4 tightens the Janitor model picker to models with clean live RP results.
+    if (Number(state.reasoningSettingsVersion || 0) < 4) {
+      state.verifiedModelIds = VERIFIED_MODEL_IDS.slice();
+      state.reasoningSettingsVersion = 4;
     }
     state.providerKeys = Array.isArray(state.providerKeys) ? state.providerKeys : [];
     state.clientKeys = Array.isArray(state.clientKeys) ? state.clientKeys : [];
