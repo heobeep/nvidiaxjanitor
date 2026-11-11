@@ -1,10 +1,10 @@
 'use strict';
 
-// Convert explicitly structured provider reasoning to Janitor's optional
-// <thinking> block. Reasoning formats are model-specific; never treat a generic
-// "analysis" field as reasoning, and never let a runaway trace flood the chat.
+// JanitorAI can display a short thinking indicator, but raw provider reasoning
+// is hidden. Model "reasoning" often contains internal scratchpads, prompt
+// summaries or malformed templates; never forward those verbatim to chat.
 
-const MAX_REASONING_CHARS = 800;
+const THINKING_STATUS = 'Reasoning received; composing the reply.';
 
 function asText(value) {
   if (typeof value === 'string') return value;
@@ -17,25 +17,6 @@ function asText(value) {
     }).join('');
   }
   return '';
-}
-
-function cleanReasoningText(value, sanitizeAssistantText) {
-  const raw = asText(value).trim();
-  if (!raw || raw.length > MAX_REASONING_CHARS) return '';
-  // Catch collapsed prompt dumps like the one flooding Janitor.
-  if (raw.split(/\s+/).some(token => token.length > 40)) return '';
-  const words = raw.split(/\s+/).filter(Boolean);
-  if (words.length > 12) {
-    const averageWordLength = words.reduce((sum, word) => sum + word.length, 0) / words.length;
-    if (averageWordLength > 16) return '';
-  }
-  const cleaned = typeof sanitizeAssistantText === 'function'
-    ? sanitizeAssistantText(raw)
-    : { text: raw, hadControlArtifacts: false };
-  if (!cleaned || cleaned.hadControlArtifacts) return '';
-  const text = asText(cleaned.text).trim();
-  if (!text || text.length > MAX_REASONING_CHARS) return '';
-  return text;
 }
 
 function extractReasoning(message) {
@@ -61,22 +42,20 @@ function toJanitorMessage(message, options) {
   const opts = options || {};
   const source = message && typeof message === 'object' ? message : {};
   const clean = opts.cleanAssistantMessage ? opts.cleanAssistantMessage(source) : Object.assign({}, source);
-  if (!opts.showReasoning) return clean;
-
-  const reasoning = cleanReasoningText(extractReasoning(source), opts.sanitizeAssistantText);
-  if (!reasoning) return clean;
+  const hasReasoning = Boolean(extractReasoning(source));
+  if (!opts.showReasoning || !hasReasoning) return clean;
 
   const originalContent = removeInlineThinking(source.content);
   const safeContent = opts.sanitizeAssistantText
     ? opts.sanitizeAssistantText(originalContent).text
     : originalContent;
-  clean.content = '<thinking>\n' + reasoning + '\n</thinking>' +
+  clean.content = '<thinking>\n' + THINKING_STATUS + '\n</thinking>' +
     (safeContent ? '\n\n' + safeContent : '');
   return clean;
 }
 
 function createStreamReasoningState() {
-  return { thinkingOpen: false, reasoningChars: 0 };
+  return { statusShown: false };
 }
 
 function mapReasoningDelta(delta, state, options) {
@@ -92,44 +71,28 @@ function mapReasoningDelta(delta, state, options) {
   delete next.analysis;
 
   let visible = '';
-  if (opts.showReasoning && reasoning && state.reasoningChars < MAX_REASONING_CHARS) {
-    let safeReasoning = cleanReasoningText(reasoning, opts.sanitizeAssistantText);
-    const remaining = MAX_REASONING_CHARS - state.reasoningChars;
-    if (safeReasoning.length > remaining) safeReasoning = safeReasoning.slice(0, remaining);
-    if (safeReasoning) {
-      if (!state.thinkingOpen) visible += '<thinking>\n';
-      visible += safeReasoning;
-      state.thinkingOpen = true;
-      state.reasoningChars += safeReasoning.length;
-    }
+  if (opts.showReasoning && reasoning && !state.statusShown) {
+    visible += '<thinking>\n' + THINKING_STATUS + '\n</thinking>\n\n';
+    state.statusShown = true;
   }
 
   const content = asText(next.content);
-  if (content) {
-    if (state.thinkingOpen) {
-      visible += '\n</thinking>\n\n';
-      state.thinkingOpen = false;
-    }
-    visible += opts.filterContent ? opts.filterContent(content) : content;
-  }
+  if (content) visible += opts.filterContent ? opts.filterContent(content) : content;
   if (visible) next.content = visible;
   else if (Object.prototype.hasOwnProperty.call(next, 'content')) delete next.content;
   return next;
 }
 
-function closeStreamReasoning(state) {
-  if (!state || !state.thinkingOpen) return '';
-  state.thinkingOpen = false;
-  return '\n</thinking>\n';
+function closeStreamReasoning() {
+  return '';
 }
 
 module.exports = {
   asText,
-  cleanReasoningText,
   extractReasoning,
   toJanitorMessage,
   createStreamReasoningState,
   mapReasoningDelta,
   closeStreamReasoning,
-  MAX_REASONING_CHARS
+  THINKING_STATUS
 };
