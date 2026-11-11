@@ -19,8 +19,8 @@ test('Mistral Large uses supported low reasoning and enough output budget', () =
   );
   assert.equal(body.reasoning_effort, 'low');
   assert.equal(body.max_tokens, 8192);
-  assert.equal(body.temperature, 0.8);
-  assert.equal(body.top_p, 1);
+  assert.equal(body.temperature, 1.0);
+  assert.equal(body.top_p, 0.95);
   assert.equal(body.chat_template_kwargs, undefined);
 });
 
