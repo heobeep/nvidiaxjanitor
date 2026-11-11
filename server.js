@@ -351,14 +351,13 @@ function detectWebSearch(messages, autoEnabled) {
 }
 async function performTavilySearch(query, apiKey) {
   const response = await axios.post('https://api.tavily.com/search', {
-    api_key: apiKey,
     query: String(query).slice(0, 500),
     search_depth: 'basic',
     topic: 'general',
     max_results: 5,
     include_answer: false,
     include_raw_content: false
-  }, { timeout: 12000, headers: { 'Content-Type': 'application/json' } });
+  }, { timeout: 12000, headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' } });
   const results = Array.isArray(response.data && response.data.results) ? response.data.results : [];
   return results.slice(0, 5).map(item => ({
     title: String(item.title || 'Untitled result').slice(0, 240),
