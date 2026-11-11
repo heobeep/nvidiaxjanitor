@@ -5,10 +5,11 @@
 // sent at the top level rather than inside an SDK-only extra_body wrapper.
 
 const ROLEPLAY_REDIRECTS = Object.freeze({
-  // MiniMax M3.1 Flash is optimized for agentic/coding workflows. JanitorAI
-  // roleplay prompts can cause it to emit tool/UI/template control text. Route
-  // old cached Janitor selections to the live-tested fast reasoning model.
-  'minimaxai/minimax-m3.1-flash': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
+  // These were the previous Janitor defaults/aliases. Route stale cached
+  // selections away from the slow Mistral path and the agentic MiniMax path
+  // to the live-tested fast reasoning model.
+  'minimaxai/minimax-m3.1-flash': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+  'mistralai/mistral-large-4-1t-a52b': 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
 });
 
 const MISTRAL_LARGE_4 = 'mistralai/mistral-large-4-1t-a52b';
