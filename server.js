@@ -7,7 +7,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
-const { ROLEPLAY_REDIRECTS, resolveModel, buildNimRequest } = require('./model-compat');
+const { ROLEPLAY_REDIRECTS, ROLEPLAY_FALLBACK_MODELS, resolveModel, buildNimRequest } = require('./model-compat');
 const { sanitizeAssistantText, cleanAssistantMessage: sanitizeAssistantMessage } = require('./response-sanitizer');
 const { toJanitorMessage, createStreamReasoningState, mapReasoningDelta, closeStreamReasoning } = require('./janitor-reasoning');
 
