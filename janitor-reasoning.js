@@ -22,7 +22,7 @@ function asText(value) {
 function cleanReasoningText(value, sanitizeAssistantText) {
   const raw = asText(value).trim();
   if (!raw || raw.length > MAX_REASONING_CHARS) return '';
-  // This catches collapsed prompt dumps like the one that was flooding Janitor.
+  // Catch collapsed prompt dumps like the one flooding Janitor.
   if (raw.split(/\s+/).some(token => token.length > 40)) return '';
   const words = raw.split(/\s+/).filter(Boolean);
   if (words.length > 12) {
