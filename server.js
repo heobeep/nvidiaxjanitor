@@ -999,6 +999,83 @@ if (process.env.QA_RUN_TOKEN) {
       console.log('[NIM_MODEL_PROBE]', JSON.stringify({ startedAt, finishedAt:new Date().toISOString(), catalogueCount:catalogue.models.length, candidates, tests }));
     })().catch(error => console.error('[NIM_MODEL_PROBE_ERROR]', cleanProviderError(error)));
   });
+  app.post('/__qa/janitor/:token', (req, res) => {
+    if (!process.env.QA_RUN_TOKEN || !safeEqual(req.params.token, process.env.QA_RUN_TOKEN)) return res.sendStatus(404);
+    res.status(202).json({ accepted: true });
+    (async () => {
+      const startedAt = new Date().toISOString();
+      const proxyKey = 'qa_' + crypto.randomBytes(24).toString('hex');
+      const clientRecord = {
+        id: id('qa'), label: 'Temporary internal QA', hash: sha256(proxyKey),
+        prefix: proxyKey.slice(0, 10), createdAt: new Date().toISOString(), lastUsedAt: null
+      };
+      state.clientKeys.push(clientRecord);
+      const model = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
+      const messages = [
+        { role: 'system', content: 'You are Mara, a warm but dry-humoured owner of a small night cafe. Roleplay in first person, use natural dialogue and brief physical actions, never write the user character\'s thoughts or actions.' },
+        { role: 'user', content: 'I step inside, shaking rain from my jacket. "Sorry, I know it is late. Is the cafe still open?"' }
+      ];
+      const endpoint = 'http://127.0.0.1:' + PORT + '/v1/chat/completions';
+      const started = Date.now();
+      let nonstream = null;
+      let streamResult = null;
+      try {
+        const response = await axios.post(endpoint, {
+          model, messages, temperature: 0.85, top_p: 0.95, max_tokens: 1024, stream: false
+        }, {
+          headers: { Authorization: 'Bearer ' + proxyKey, 'Content-Type': 'application/json' },
+          timeout: 45000, validateStatus: status => status >= 200 && status < 300
+        });
+        const choice = response.data && response.data.choices && response.data.choices[0];
+        const content = choice && choice.message && typeof choice.message.content === 'string' ? choice.message.content : '';
+        nonstream = {
+          httpStatus: response.status, latencyMs: Date.now() - started,
+          model: response.data.model, finishReason: choice && choice.finish_reason,
+          contentChars: content.length, hasThinkingOpen: content.includes('<thinking>'),
+          hasThinkingClose: content.includes('</thinking>'),
+          replyPreview: content.replace(/<thinking>[\s\S]*?<\/thinking>/g, '[thinking shown]').slice(0, 280)
+        };
+      } catch (error) {
+        nonstream = { httpStatus: error.response && error.response.status || null, latencyMs: Date.now() - started, error: cleanProviderError(error) };
+      }
+      const streamStarted = Date.now();
+      try {
+        const response = await axios.post(endpoint, {
+          model, messages, temperature: 0.85, top_p: 0.95, max_tokens: 1024, stream: true
+        }, {
+          headers: { Authorization: 'Bearer ' + proxyKey, 'Content-Type': 'application/json' },
+          timeout: 45000, responseType: 'stream', validateStatus: status => status >= 200 && status < 300
+        });
+        let raw = '', firstTokenMs = null, completed = false;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (response.data && response.data.destroy) response.data.destroy(new Error('QA stream timed out after 45 seconds'));
+            reject(new Error('QA stream timed out after 45 seconds'));
+          }, 45000);
+          response.data.on('data', chunk => {
+            const part = chunk.toString('utf8');
+            if (firstTokenMs === null && part.trim()) firstTokenMs = Date.now() - streamStarted;
+            raw += part;
+          });
+          response.data.on('end', () => { completed = true; clearTimeout(timer); resolve(); });
+          response.data.on('error', error => { clearTimeout(timer); reject(error); });
+        });
+        streamResult = {
+          httpStatus: response.status, latencyMs: Date.now() - streamStarted, firstTokenMs,
+          completed, doneMarker: raw.includes('data: [DONE]'),
+          hasThinkingOpen: raw.includes('<thinking>'), hasThinkingClose: raw.includes('</thinking>'),
+          streamBytes: Buffer.byteLength(raw)
+        };
+      } catch (error) {
+        streamResult = { latencyMs: Date.now() - streamStarted, error: cleanProviderError(error) };
+      }
+      console.log('[JANITOR_INTEGRATION_QA]', JSON.stringify({
+        startedAt, finishedAt: new Date().toISOString(), model, nonstream, stream: streamResult
+      }));
+    })().catch(error => console.error('[JANITOR_INTEGRATION_QA_ERROR]', cleanProviderError(error)))
+      .finally(() => { state.clientKeys = state.clientKeys.filter(key => key.id !== clientRecord.id); });
+  });
+
 }
 
 app.all('*', (req, res) => {
