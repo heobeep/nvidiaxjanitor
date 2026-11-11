@@ -905,6 +905,126 @@ app.post('/admin/api/models/race', async (req, res) => {
   } catch (error) { if(modelRaceProgress){modelRaceProgress.running=false;modelRaceProgress.phase='failed';modelRaceProgress.error=error.message||'Model race failed.';modelRaceProgress.events.unshift({at:new Date().toISOString(),type:'error',message:modelRaceProgress.error});} res.status(error.status || 502).json({ error:error.message || 'Model race failed.',providers:error.modelResults || [] }); }
 });
 
+
+if (process.env.QA_RUN_TOKEN) {
+  app.post('/__qa/run/' + process.env.QA_RUN_TOKEN, (req, res) => {
+    const runId = id('qa');
+    res.status(202).json({ accepted: true, runId, message: 'Conversation quality test started.' });
+    setImmediate(async () => {
+      const tempSecret = 'qa_' + crypto.randomBytes(32).toString('hex');
+      const tempClient = { id: id('client'), label: 'Temporary internal QA', hash: sha256(tempSecret), prefix: 'qa-internal', createdAt: new Date().toISOString(), lastUsedAt: null };
+      state.clientKeys.push(tempClient);
+      const report = { runId, startedAt: new Date().toISOString(), webSearch: { enabled: !!(state.webSearch && state.webSearch.enabled), configured: !!((state.webSearch && state.webSearch.apiKey) || process.env.TAVILY_API_KEY) }, tests: [] };
+      const localUrl = 'http://127.0.0.1:' + PORT + '/v1/chat/completions';
+      async function chat(messages, options) {
+        const started = Date.now();
+        const response = await axios.post(localUrl, Object.assign({
+          model: report.model,
+          messages,
+          temperature: 0.75,
+          max_tokens: 300,
+          stream: false
+        }, options || {}), {
+          headers: { Authorization: 'Bearer ' + tempSecret, 'Content-Type': 'application/json' },
+          timeout: 150000
+        });
+        const choice = response.data && response.data.choices && response.data.choices[0];
+        const message = choice && choice.message || {};
+        const content = typeof message.content === 'string' ? message.content : '';
+        return {
+          content,
+          latencyMs: Date.now() - started,
+          finishReason: choice && choice.finish_reason || null,
+          reasoningFieldsPresent: ['reasoning', 'reasoning_content', 'thinking', 'analysis'].some(key => Object.prototype.hasOwnProperty.call(message, key)),
+          searchHeader: response.headers['x-proxy-web-search'] || 'not-used',
+          searchResultCount: response.headers['x-proxy-web-search-results'] || '0'
+        };
+      }
+      try {
+        if (!state.providerKeys.some(key => key.enabled !== false)) throw new Error('No enabled NVIDIA provider keys are configured.');
+        const catalogue = await refreshModels(true);
+        const available = catalogue.models || [];
+        const preferred = state.settings.default_model && available.find(model => model.id === state.settings.default_model);
+        const chatCandidates = available.filter(model => !/(embed|rerank|guard|nemo|bge)/i.test(model.id || ''));
+        const selected = preferred || chatCandidates.find(model => /mistral.*large/i.test(model.id)) || chatCandidates.find(model => /gpt-oss.*120b|llama.*70b|deepseek/i.test(model.id)) || chatCandidates[0];
+        if (!selected) throw new Error('No chat-capable model was found in the current NVIDIA catalogue.');
+        report.model = selected.id;
+        report.catalogueCount = available.length;
+
+        const casual = [
+          { role: 'system', content: 'Be a natural, emotionally aware conversation partner. Sound like a real person texting, not a help article. Keep replies concise, do not over-explain, and never reveal private reasoning.' },
+          { role: 'user', content: 'Hey, I finally got home. Today was exhausting and I cannot decide whether to cook something or just eat toast. What would you do?' }
+        ];
+        const first = await chat(casual);
+        casual.push({ role: 'assistant', content: first.content });
+        casual.push({ role: 'user', content: 'Toast wins. Give me a tiny 15-minute plan, and please do not turn it into a motivational speech.' });
+        const followup = await chat(casual);
+        report.tests.push({ name: 'casual conversation', ...first });
+        report.tests.push({ name: 'context-dependent follow-up', ...followup });
+
+        const roleplay = [
+          { role: 'system', content: 'You are Mira, a grounded and playful fictional character in a contemporary slice-of-life scene. Use natural dialogue and small actions. Never control the user character, do not write the user’s dialogue, and avoid purple prose or meta commentary. Do not reveal private reasoning.' },
+          { role: 'user', content: 'I turn up at the tea stall twenty minutes late, drenched from the rain. “Before you complain, the bus broke down.”' }
+        ];
+        const rp = await chat(roleplay, { temperature: 0.85, max_tokens: 360 });
+        report.tests.push({ name: 'character roleplay', ...rp });
+
+        const searchMessages = [
+          { role: 'system', content: 'Answer naturally and briefly. For current factual questions, use the supplied live search context and cite sources with URLs and dates. Do not invent sources.' },
+          { role: 'user', content: '/search What are the latest important NVIDIA NIM updates in 2026? Give me three useful points with source links and dates.' }
+        ];
+        const searched = await chat(searchMessages, { temperature: 0.25, max_tokens: 450 });
+        report.tests.push({ name: 'explicit live web search', ...searched });
+
+        const streamStarted = Date.now();
+        const streamResponse = await axios.post(localUrl, {
+          model: report.model,
+          messages: [{ role: 'system', content: 'Be concise. Never reveal private reasoning.' }, { role: 'user', content: 'In two short sentences, tell me something comforting after a long day.' }],
+          temperature: 0.7,
+          max_tokens: 140,
+          stream: true
+        }, {
+          headers: { Authorization: 'Bearer ' + tempSecret, 'Content-Type': 'application/json' },
+          responseType: 'stream',
+          timeout: 150000
+        });
+        let streamBuffer = '';
+        let streamText = '';
+        let firstTokenMs = null;
+        let sawDone = false;
+        let reasoningFieldSeen = false;
+        for await (const chunk of streamResponse.data) {
+          if (firstTokenMs === null) firstTokenMs = Date.now() - streamStarted;
+          streamBuffer += chunk.toString('utf8');
+          const frames = streamBuffer.split(/\r?\n\r?\n/);
+          streamBuffer = frames.pop() || '';
+          for (const frame of frames) {
+            const raw = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+            if (!raw) continue;
+            if (raw === '[DONE]') { sawDone = true; continue; }
+            try {
+              const data = JSON.parse(raw);
+              const delta = data.choices && data.choices[0] && data.choices[0].delta || {};
+              reasoningFieldSeen = reasoningFieldSeen || ['reasoning','reasoning_content','thinking','analysis'].some(key => Object.prototype.hasOwnProperty.call(delta,key));
+              if (typeof delta.content === 'string') streamText += delta.content;
+            } catch (_) {}
+          }
+        }
+        report.tests.push({ name: 'streaming response', content: streamText, latencyMs: Date.now() - streamStarted, firstTokenMs, sawDone, reasoningFieldPresent: reasoningFieldSeen });
+
+        report.finishedAt = new Date().toISOString();
+        console.log('NVIDIAXJANITOR_QA_RESULT ' + JSON.stringify(report));
+      } catch (error) {
+        report.error = cleanProviderError(error);
+        report.finishedAt = new Date().toISOString();
+        console.log('NVIDIAXJANITOR_QA_RESULT ' + JSON.stringify(report));
+      } finally {
+        state.clientKeys = state.clientKeys.filter(key => key.id !== tempClient.id);
+      }
+    });
+  });
+}
+
 app.all('*', (req, res) => {
   res.status(404).json({ error: { message: 'Endpoint ' + req.path + ' not found', type: 'invalid_request_error', code: 404 } });
 });
